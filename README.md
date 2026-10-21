@@ -1,76 +1,166 @@
 # whittle
 
-Evolutionary optimization of 3D parts. Take material away until only what
-carries the load is left, or push a surface around until the flow over it costs
-less. OBJ and STL at both ends.
+Evolutionary optimization of 3D parts, for people who build things. Take
+material away until only what carries the load is left, or carve a shape down
+until the air slips past it. OBJ and STL at both ends.
 
-## The bet
+Bring a part. Say what pushes on it, or which way the wind blows. Get back a
+**slider**: the part with more and more material removed, every step scored,
+from conservative to extreme. You pick how far to go.
 
-Strength-per-material and aerodynamic shaping sound like one problem and are
-not. They want different geometry representations, and most tools pick one and
-quietly inherit its limits.
+```python
+from whittle import LoadStudy, FlowStudy, io
 
-| | can open a hole | keeps the mesh watertight | the question it answers |
-|---|---|---|---|
-| `DensityField` | yes | after meshing | where does material need to be at all? |
-| `FFDLattice` | **no** | always | what shape should this surface be? |
+# Lighten a bracket without losing the strength it needs.
+study = LoadStudy(io.load("bracket.stl"), material="pla")
+study.support(box=((0, 0, 0), (4, 8, 80)))          # screwed to the wall
+study.load((0, 0, -245), box=((70, 0, 76), (80, 8, 80)))   # 25 kg on the tip
+sweep = study.sweep(remove_up_to=0.8)
+print(sweep)
+io.save(sweep.at(0.6).mesh, "bracket-60.stl")
 
-A deformation lattice cannot discover that a bracket wanted a hole through the
-middle — no arrangement of control points will produce one. A density field can,
-but it has to be meshed before anyone can print it, and it has no notion of the
-smooth surface a duct needs. So this library has both, behind one interface, and
-the optimizer never learns which it is driving.
+# Carve a roof box until it cuts through the air.
+study = FlowStudy(io.load("roof_box.stl"), flow=(-1, 0, 0), mirror="y", flat=("-z",))
+sweep = study.sweep(remove_up_to=0.25)
+io.save(sweep.slide(0.5).mesh, "roof_box-halfway.stl")
+```
 
-That seam is the whole design. Everything else is replaceable.
+## Why a slider and not an answer
 
-## Why evolutionary, when gradient methods are faster
+Neither physics model here is accurate enough to pick *the* answer, and no
+model would be -- the load was estimated, the material idealized, the print
+will have layer lines. A single optimum computed from those inputs is false
+precision. What the physics *is* good at is the shape of the trade-off: how
+much stiffness the first 30% of material costs (almost none), where the safety
+factor falls off a cliff, how much of the drag saving the first 10% of carving
+already buys. That is a table to read, so that is what a sweep gives you:
 
-For textbook compliance minimization they *are* faster, and considerably. If
-your problem is a linear-elastic part under a fixed load with a volume
-constraint, adjoint-based SIMP will beat this and you should use it.
+```
+removed  mass g  stiffness  deflect mm  stress MPa  safety
+-------  ------  ---------  ----------  ----------  ------
+     0%    40.2       100%       0.177         4.3    9.4x
+    10%    36.2        98%       0.179         4.3    9.4x
+    20%    32.2        95%       0.184         4.3    9.3x
+    30%    28.2        89%       0.193         4.4    9.1x
+    40%    24.1        80%       0.210         4.9    8.1x
+    50%    20.1        68%       0.242         6.4    6.3x
+    60%    16.1        53%       0.308         8.4    4.8x
+    70%    12.1        36%       0.439        13.3    3.0x
+    80%     8.0        19%       0.850        24.1    1.7x
+```
 
-Evolutionary search earns its place where the gradient isn't available or isn't
-meaningful:
+That is `examples/02_shelf_bracket.py`: an 8 mm PLA bracket carrying 25 kg.
+Seventy percent of it can go and it still has a 3x margin; the last ten percent
+halves that. The designs it passes through are the textbook ones -- a diagonal
+strut under compression and a tie along the top in tension -- found by the
+solver, not drawn by anyone.
 
-- **Objectives you cannot differentiate through.** A CFD solve, a meshing step,
-  a slicer's own verdict on printability.
-- **Manufacturing constraints that are discrete.** Minimum tool reach, a
-  draft-angle rule, "this face must stay flat", a fixed catalogue of lattice
-  cells. These are conditionals, not smooth penalties.
-- **Several objectives at once,** where you want the trade-off curve rather
-  than one point you got by guessing weights.
+Each station evolves from the one before it, so sliding along a sweep reads as
+one part being whittled down, not as unrelated designs. That is the property a
+GUI slider needs, and it is what the web interface on the roadmap is for.
 
-That is the same reasoning behind [EML](https://github.com/greentheo/EML), and
-the `optimizer` seam in `whittle.optimize.evolve` exists so that engine can
-replace scipy's differential evolution without touching anything else.
+## The two studies
+
+| | `LoadStudy` | `FlowStudy` |
+|---|---|---|
+| you place | supports and loads (`at=` a point or `box=`) | the flow direction |
+| it protects | `keep(...)` -- bolt bosses, mating faces | `keep(box)` -- cargo space; `flat=` faces; `mirror=` |
+| physics | linear-elastic FEA on a voxel grid | engineering drag model on the surface mesh |
+| search | BESO: remove the voxels doing the least work | differential evolution over a deformation lattice |
+| geometry | can open holes, grow trusses | stays one smooth closed surface, never grows |
+| each station reports | mass, stiffness kept, deflection, stress, safety factor | drag vs original, Cd, CdA, newtons at speed |
+
+The split is the old one this library started from. Lightening a part wants a
+representation that can open a hole -- no smooth deformation of a solid block
+will ever find a truss. Shaping against a flow wants the opposite: a surface
+that stays closed and smooth, because drag is decided by its curvature.
+
+## How far to trust it
+
+**Structure -- validated.** Eight-node hexahedra, one per voxel, solved by
+matrix-free conjugate gradients. Against beam theory, a voxel cantilever's tip
+deflection comes out within 1-4%; its peak stress (the 99th percentile, kept a
+voxel clear of the clamp and load) within 10-15% low. Tests hold both. The
+honest gaps are in the inputs, not the solver:
+
+- **Printed parts are not isotropic.** The materials table assumes 100% infill
+  loaded along the layers. Across layers a print can be half as strong; at
+  partial infill, stiffness and strength drop roughly with the infill. Read a
+  safety factor under about 3 on a print as "build one and test it."
+- **Loads are static.** No impact, no fatigue, no buckling. A thin compression
+  strut that the table calls safe can buckle.
+- **Resolution sets the finest member.** About 48 voxels along the longest side
+  is the default; members come out at least two to three voxels thick.
+
+**Aero -- an engineering estimate, not CFD.** `DragModel` scores a mesh in
+about a millisecond from the few facts that decide most of the drag of a
+bluff body at highway speed: faces into the wind are pushed on (Newtonian),
+convex shoulders get suction, a surface falling away steeper than about 20
+degrees sheds a wake, long thin sections shed a stronger two-dimensional one,
+friction scales with wetted area, and whatever sits in another body's wake is
+sheltered. Calibrated against high-Reynolds-number textbook values:
+
+| shape | model Cd | reference |
+|---|---|---|
+| flat plate, face on | 1.29 | 1.17-1.28 |
+| plate 20x as long as wide | 1.53 | 1.5 |
+| endless plate (2D) | 2.01 | 1.98 |
+| cube | 1.09 | 1.05 |
+| sphere | 0.19 | 0.2 (above drag crisis) |
+| streamlined body, L/D 4 | 0.11 | 0.05-0.1 |
+
+Trust its rankings -- rounded nose over square, gentle taper over steep, the
+order of the designs in a sweep. Treat its absolute numbers as good to perhaps
+30%, and optimistic for anything sitting in a car's own disturbed airflow,
+which it does not see. It also cannot see crosswind, vortex shedding, lift, or
+gaps between bodies. When those matter, take the two or three designs it
+picked to a real CFD run; that is what it is for.
+
+## Why evolutionary
+
+Two different kinds, for two different reasons.
+
+**BESO for structure** (`whittle.beso`). Every FEA solve says how hard every
+voxel is working, so the search can remove the idlest few percent, let
+material regrow beside the busiest, and repeat -- about a hundred solves for a
+whole sweep, where a population search over the same design would need tens
+of thousands. Its history *is* the slider.
+
+**Differential evolution for everything else** (`whittle.evolve`). Where the
+objective is a black box -- the drag model, a meshing step, a printability
+check -- or the constraints are conditionals rather than smooth penalties, a
+population method is the right tool. The flow study runs one search per
+station, each seeded around the last, which keeps neighbouring stations
+alike. The `optimizer` seam is where [EML](https://github.com/greentheo/EML)
+can replace scipy's engine without touching anything else.
 
 ## Status
 
-Honest version, because a topology optimizer that reports confident numbers
-from a solver it does not have is worse than no optimizer.
+**Works, tested (110 tests, ~14 s), runs today**
 
-**Works, tested, runs today**
+- `LoadStudy`, `FlowStudy`, `Sweep` -- the part-in, slider-out workflow
+- `VoxelFEA` -- linear-elastic hex FEA, matrix-free CG, stress and safety
+  factor, floating material dropped, broken load paths reported
+- `beso` -- bi-directional evolutionary structural optimization with stations
+- `DragModel` -- the drag estimate above, with a per-face breakdown of where
+  the drag comes from
+- `Grid` -- voxelizing any closed STL, selecting regions by point or box,
+  meshing results with smoothing that keeps volume
+- `Compliance` -- the FEA as an objective for population search, replacing
+  the geometric proxy `AnchorConnectivity` (which stays, as a cheap pre-filter)
+- `FFDLattice` -- now with frozen control points, mirror symmetry, inward-only
+  carving
+- OBJ and STL in and out
 
-- OBJ and STL read and write, including welding STL's per-triangle corners back
-  into a shared-vertex mesh
-- `DensityField` — coarse control grid, upsampled, thresholded, marching cubes;
-  `keep`/`void` masks the optimizer cannot erode
-- `FFDLattice` — trivariate Bezier deformation, basis precomputed per vertex
-- `MaterialFraction`, `MeshVolume`, `AnchorConnectivity`
-- The evolutionary loop, frozen-parameter handling, end-to-end to an STL
+**Not yet**
 
-**Deliberately not implemented**
-
-- `Compliance` — needs a real FEA solve. Raises `NotImplementedError` rather
-  than returning a plausible number. **This is why no structural claim in this
-  repo is proven yet.**
-- `DragCoefficient` — needs a flow solver. Same policy.
-
-`AnchorConnectivity` stands in for structural validity today. It checks that
-material actually joins the load to the supports, which is necessary and
-nowhere near sufficient — a one-voxel thread passes it and would snap on
-contact. It is scaffolding that makes the pipeline runnable and testable, not
-physics.
+- A GUI. The API is shaped for one -- a point to `at=`, a box to `box=`, a
+  sweep to a slider -- and it is next on the roadmap.
+- Speed on fine grids. Jacobi-preconditioned CG needs hundreds of iterations
+  on a slender part; a structural sweep is about 30 s at the default
+  resolution (48 voxels along the longest side) and 86 s at 60. Multigrid is
+  the fix.
+- A real flow solver to check the drag model against.
 
 ## Install
 
@@ -85,82 +175,45 @@ Three dependencies: numpy, scipy, scikit-image. The mesh IO is eighty lines in
 `src/whittle/io.py` rather than a mesh library, because we need triangles in and
 triangles out and nothing else.
 
-## A first run
+## Examples
 
-```bash
-python examples/01_bridge.py
+Times measured on one core of an M4 laptop. Everything is written to `out/`.
+
+| | what it shows | time |
+|---|---|---|
+| `01_bridge.py` | population search on a density field, with the geometric proxy -- and the thread-thin result that proxy produces | 10 s |
+| `02_shelf_bracket.py` | `LoadStudy`: a solid bracket whittled to a truss, table above | 31 s |
+| `03_roof_box.py` | `FlowStudy`: a square 2 m roof box carved around a protected cargo block | 84 s |
+| `04_roof_bar.py` | `FlowStudy(extruded=...)`: a rectangular rack bar reshaped, as a 2D section | 35 s |
+
+The roof box, for a taste of the flow side:
+
+```
+removed  drag     Cd  CdA m2  N @110km/h
+-------  ----  -----  ------  ----------
+     0%  100%  0.796  0.2928       167.4
+     5%   81%  0.657  0.2379       136.1
+     9%   59%  0.484  0.1721        98.4
+    15%   32%  0.262  0.0938        53.6
+    20%   23%  0.197  0.0687        39.3
+    25%   21%  0.190  0.0609        34.8
+
+80% of the available drag saving by 15% removed
 ```
 
-Evolves a density field to connect three anchor pads using as little material as
-possible, and writes `out/bridge.stl` and `out/bridge.obj`.
-
-Measured on a 32x6x16 design box with a 8x2x4 control grid — 64 free
-parameters, 10,009 evaluations, **10.0s on one core**:
-
-```
-fitness=0.381150  (material=0.3811, connectivity=0.0000)
-mesh:    1254 vertices, 2500 triangles
-volume:  642.6 of 3072 in the design box
-```
-
-Connectivity reached zero, so the three pads really are joined by material.
-
-**Two things in that result are worth staring at,** because they are what the
-proxy costs you:
-
-1. The structure it found is a thin thread. Nothing in the objective rewards
-   thickness, so nothing stops it going as thin as the grid allows. Under a real
-   load it would fail immediately.
-2. Of 772 solid voxels, **35 are a blob floating free of every anchor** —
-   connected to nothing, carrying nothing, and unprintable without supports.
-   The only thing arguing against it is its own small material cost.
-
-Both are artifacts of scoring geometry instead of physics, and both disappear on
-their own once `Compliance` lands: material that carries no load contributes
-nothing to stiffness, so the material term drives it out without anyone having
-to write a rule against it. That is the argument for ROADMAP.md item 1, stated
-in results rather than in prose.
-
-```python
-import numpy as np
-from whittle import AnchorConnectivity, DensityField, MaterialFraction, WeightedSum, evolve, io
-
-shape = (32, 6, 16)
-
-def pad(x0, x1, z0, z1):
-    mask = np.zeros(shape, dtype=bool)
-    mask[x0:x1, :, z0:z1] = True
-    return mask
-
-anchors = [
-    pad(1, 4, 0, 2),      # left foot
-    pad(28, 31, 0, 2),    # right foot
-    pad(14, 18, 14, 16),  # load pad up top
-]
-keep = anchors[0] | anchors[1] | anchors[2]
-
-backend = DensityField(shape, control_shape=(8, 2, 4), keep=keep)
-objective = WeightedSum({
-    MaterialFraction(): 1.0,
-    AnchorConnectivity(anchors): 4.0,
-})
-
-result = evolve(backend, objective, seed=0, maxiter=25, popsize=6)
-print(result)                       # fitness, evaluations, per-objective terms
-io.save(result.mesh, "bridge.stl")
-```
-
-`keep` is the boundary condition the optimizer cannot argue with: those voxels
-stay solid no matter what genome is proposed, which is how a load pad or a bolt
-boss survives a search whose whole purpose is removing material.
+The nose rounds, then slopes, then the box narrows towards the front in plan --
+the shape commercial roof boxes converge on -- while the cargo block stays
+whole. The 5x drag reduction at the end is the model's free-air optimism; the
+ordering and the knee of the curve are the parts to act on.
 
 ## Where this is going
 
-`ROADMAP.md`, in the order the items should be built. The short version: the FEA
-solver is item 1, and until it lands this is a well-shaped search loop around a
-geometric proxy.
+`ROADMAP.md`. The short version: a web GUI around the slider is next, then
+multigrid to make finer grids fast, then a real flow solve to check the drag
+model's picks against.
 
 ---
 
 A tool that tells you how much material you saved, without having checked the
-part still holds, is not a tool. It is a flattering picture.
+part still holds, is not a tool. It is a flattering picture. This one checks --
+approximately, and says how approximately.

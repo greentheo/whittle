@@ -6,7 +6,38 @@ import numpy as np
 from scipy import ndimage
 from skimage import measure
 
-from ..types import FloatArray, Genome, IntArray, Mesh
+from ..types import FloatArray, Genome, IntArray, Mesh, Vector3
+
+
+def contour(
+    grid: FloatArray,
+    level: float,
+    *,
+    spacing: float = 1.0,
+    origin: Vector3 = (0.0, 0.0, 0.0),
+) -> Mesh:
+    """Mesh the ``level`` isosurface of a voxel grid with marching cubes.
+
+    Voxel ``(i, j, k)`` is sampled at ``origin + spacing * (i, j, k)``, which is
+    the same convention :class:`whittle.voxel.Grid` uses, so a part voxelized
+    from an STL comes back out where it went in.
+    """
+    # Pad with empty space so the surface closes at the grid boundary
+    # instead of being left open where material runs off the edge.
+    padded = np.pad(grid, 1, mode="constant", constant_values=0.0)
+    if padded.max() <= level or padded.min() >= level:
+        return Mesh(np.zeros((0, 3), dtype=np.float64), np.zeros((0, 3), dtype=np.int64))
+    verts, faces, _, _ = measure.marching_cubes(  # type: ignore[no-untyped-call]
+        padded, level=level
+    )
+    vertices: FloatArray = (np.asarray(verts, dtype=np.float64) - 1.0) * spacing + np.asarray(
+        origin, dtype=np.float64
+    )
+    # marching_cubes winds its triangles so the normals point into the
+    # solid. Reverse them: an STL with inward normals is read inside-out by
+    # every slicer, and the signed volume comes out negative.
+    wound: IntArray = np.asarray(faces, dtype=np.int64)[:, ::-1]
+    return Mesh(vertices, np.ascontiguousarray(wound))
 
 
 class DensityField:
@@ -37,6 +68,7 @@ class DensityField:
         control_shape: tuple[int, int, int],
         *,
         spacing: float = 1.0,
+        origin: Vector3 = (0.0, 0.0, 0.0),
         keep: np.ndarray | None = None,
         void: np.ndarray | None = None,
         threshold: float = 0.5,
@@ -50,6 +82,7 @@ class DensityField:
         self.shape = shape
         self.control_shape = control_shape
         self.spacing = float(spacing)
+        self.origin = origin
         self.threshold = float(threshold)
         self.keep = self._check_mask(keep, "keep")
         self.void = self._check_mask(void, "void")
@@ -98,20 +131,7 @@ class DensityField:
 
     def mesh_field(self, grid: FloatArray) -> Mesh:
         """Mesh an already-decoded field. Useful when an objective has one in hand."""
-        # Pad with empty space so the surface closes at the grid boundary
-        # instead of being left open where material runs off the edge.
-        padded = np.pad(grid, 1, mode="constant", constant_values=0.0)
-        if padded.max() <= self.threshold or padded.min() >= self.threshold:
-            return Mesh(np.zeros((0, 3), dtype=np.float64), np.zeros((0, 3), dtype=np.int64))
-        verts, faces, _, _ = measure.marching_cubes(  # type: ignore[no-untyped-call]
-            padded, level=self.threshold
-        )
-        vertices: FloatArray = (np.asarray(verts, dtype=np.float64) - 1.0) * self.spacing
-        # marching_cubes winds its triangles so the normals point into the
-        # solid. Reverse them: an STL with inward normals is read inside-out by
-        # every slicer, and the signed volume comes out negative.
-        wound: IntArray = np.asarray(faces, dtype=np.int64)[:, ::-1]
-        return Mesh(vertices, np.ascontiguousarray(wound))
+        return contour(grid, self.threshold, spacing=self.spacing, origin=self.origin)
 
     def solid(self, genome: Genome) -> np.ndarray:
         """The thresholded boolean occupancy, for connectivity-style objectives."""

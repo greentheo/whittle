@@ -88,7 +88,7 @@ def _load_stl_binary(raw: bytes) -> Mesh:
     )
     data = np.frombuffer(raw, dtype=record, count=n_tri, offset=84)
     corners = np.asarray(data["corners"], dtype=np.float64).reshape(-1, 3)
-    return _weld(corners)
+    return weld(corners)
 
 
 def _load_stl_ascii(raw: bytes) -> Mesh:
@@ -97,10 +97,10 @@ def _load_stl_ascii(raw: bytes) -> Mesh:
         parts = line.split()
         if parts and parts[0] == "vertex":
             corners.append((float(parts[1]), float(parts[2]), float(parts[3])))
-    return _weld(np.asarray(corners, dtype=np.float64).reshape(-1, 3))
+    return weld(np.asarray(corners, dtype=np.float64).reshape(-1, 3))
 
 
-def _weld(corners: FloatArray, decimals: int = 9) -> Mesh:
+def weld(corners: FloatArray, decimals: int = 9) -> Mesh:
     """Collapse per-triangle corners into shared vertices.
 
     STL stores every triangle's corners independently, so a loaded mesh has

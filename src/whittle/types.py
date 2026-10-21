@@ -15,6 +15,11 @@ import numpy.typing as npt
 
 FloatArray = npt.NDArray[np.float64]
 IntArray = npt.NDArray[np.int64]
+BoolArray = npt.NDArray[np.bool_]
+
+#: A point or direction in model space. Model units are millimetres wherever
+#: physics is involved, because that is what STL files from CAD and slicers use.
+Vector3 = tuple[float, float, float]
 
 #: A candidate solution, as the optimizer sees it: an unlabelled float vector.
 Genome = FloatArray

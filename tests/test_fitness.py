@@ -8,11 +8,20 @@ from whittle import (
     Candidate,
     Compliance,
     DensityField,
+    DragArea,
     DragCoefficient,
     FFDLattice,
+    Grid,
+    KeepOut,
+    Load,
     MaterialFraction,
     MeshVolume,
+    NoFolding,
+    StayInside,
+    Support,
+    VolumeBudget,
     WeightedSum,
+    shapes,
 )
 from whittle.types import Mesh
 
@@ -100,10 +109,88 @@ def test_weighted_sum_needs_an_objective() -> None:
         WeightedSum({})
 
 
-def test_unimplemented_physics_refuses_rather_than_guessing() -> None:
-    backend = DensityField((4, 4, 4), (2, 2, 2))
-    candidate = Candidate(np.ones(8), backend)
-    with pytest.raises(NotImplementedError, match=r"FEA solver"):
-        Compliance()(candidate)
-    with pytest.raises(NotImplementedError, match=r"flow solver"):
-        DragCoefficient()(candidate)
+def _beam_problem() -> tuple[DensityField, list[Load], list[Support]]:
+    shape = (16, 4, 4)
+    clamp = np.zeros(shape, dtype=bool)
+    clamp[0] = True
+    tip = np.zeros(shape, dtype=bool)
+    tip[-1] = True
+    backend = DensityField(shape, (16, 4, 4), keep=clamp | tip)
+    return backend, [Load(tip, (0.0, 0.0, -5.0))], [Support(clamp)]
+
+
+def test_compliance_is_one_for_the_full_box_and_rises_as_material_goes() -> None:
+    backend, loads, supports = _beam_problem()
+    objective = Compliance(loads=loads, supports=supports)
+    full = np.ones(backend.shape)
+    assert objective(Candidate(full.ravel(), backend)) == pytest.approx(1.0, rel=1e-4)
+    hollow = full.copy()
+    hollow[2:14, 1:3, 1:3] = 0.0
+    assert objective(Candidate(hollow.ravel(), backend)) > 1.0
+
+
+def test_compliance_penalizes_a_broken_load_path() -> None:
+    backend, loads, supports = _beam_problem()
+    objective = Compliance(loads=loads, supports=supports, unsupported=500.0)
+    broken = np.ones(backend.shape)
+    broken[8] = 0.0
+    assert objective(Candidate(broken.ravel(), backend)) == 500.0
+
+
+def test_compliance_needs_a_density_field(unit_cube: Mesh) -> None:
+    _, loads, supports = _beam_problem()
+    lattice = FFDLattice(unit_cube, divisions=(1, 1, 1))
+    with pytest.raises(TypeError, match=r"DensityField"):
+        Compliance(loads=loads, supports=supports)(Candidate(np.zeros(24), lattice))
+
+
+def test_drag_objectives_score_the_mesh(unit_cube: Mesh) -> None:
+    lattice = FFDLattice(unit_cube, divisions=(1, 1, 1))
+    candidate = Candidate(np.zeros(24), lattice)
+    area = DragArea((1.0, 0.0, 0.0))(candidate)
+    assert DragArea((1.0, 0.0, 0.0), reference=area)(candidate) == pytest.approx(1.0)
+    # The fixture is a unit cube made of twelve triangles: no edges to read
+    # curvature from, but a flat front and a flat back are all a cube needs.
+    assert 0.9 < DragCoefficient((1.0, 0.0, 0.0))(candidate) < 1.2
+
+
+def test_shape_constraints_are_zero_when_satisfied() -> None:
+    sphere = shapes.sphere(10.0, subdivisions=3)
+    grid = Grid.around(sphere, spacing=1.0, pad=2)
+    solid = grid.voxelize(sphere)
+    lattice = FFDLattice(sphere, divisions=(1, 1, 1), max_displacement=5.0)
+    still = Candidate(np.zeros(lattice.n_params), lattice)
+    assert StayInside(grid, solid)(still) == 0.0
+    assert VolumeBudget(sphere.volume, 0.1)(still) == 0.0
+    assert NoFolding(sphere)(still) == 0.0
+    assert KeepOut([((-3, -3, -3), (3, 3, 3))])(still) == 0.0
+
+
+def test_shape_constraints_catch_violations() -> None:
+    sphere = shapes.sphere(10.0, subdivisions=3)
+    grid = Grid.around(sphere, spacing=1.0, pad=4)
+    solid = grid.voxelize(sphere)
+
+    def scaled(factor: float) -> Candidate:
+        return Candidate(np.zeros(1), _Fixed(Mesh(sphere.vertices * factor, sphere.faces)))
+
+    assert StayInside(grid, solid)(scaled(1.2)) > 1.0
+    assert VolumeBudget(sphere.volume, 0.1)(scaled(0.8)) == pytest.approx(1 - 0.8**3 - 0.1)
+    assert KeepOut([((-9, -9, -9), (9, 9, 9))])(scaled(0.5)) > 0.0
+    inside_out = Mesh(sphere.vertices, np.ascontiguousarray(sphere.faces[:, ::-1]))
+    inverted = Candidate(np.zeros(1), _Fixed(inside_out))
+    assert NoFolding(sphere)(inverted) == pytest.approx(1.0)
+
+
+class _Fixed:
+    """A backend that always builds the same mesh, for scoring a shape directly."""
+
+    changes_topology = False
+    n_params = 1
+    bounds = [(0.0, 1.0)]
+
+    def __init__(self, mesh: Mesh) -> None:
+        self.mesh = mesh
+
+    def build(self, genome: np.ndarray) -> Mesh:
+        return self.mesh

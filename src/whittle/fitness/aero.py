@@ -1,42 +1,50 @@
-"""Fluid objectives: how hard is it to push this shape through air or water?"""
+"""Fluid objectives: how hard is it to push this shape through air or water?
+
+Both are scored by :class:`~whittle.physics.drag.DragModel`, a fast engineering
+estimate rather than a flow solve. Read its docstring before trusting a number
+from either: it ranks shapes well and gets absolute drag to perhaps 30%.
+
+Use these with :class:`~whittle.geometry.ffd.FFDLattice`, which keeps the
+surface closed and smooth. A density field's marching-cubes surface is
+terraced, and the drag model reads its normals.
+"""
 
 from __future__ import annotations
 
+from ..physics.drag import DragModel
+from ..types import Vector3
 from .base import Candidate
 
 
-class DragCoefficient:
-    """Drag on the candidate under a prescribed flow.
+class DragArea:
+    """Drag area ``Cd * A`` -- what the drag force is proportional to.
 
-    Not implemented, and the honest reason is that this one is not a weekend's
-    work the way the structural solver is. A usable answer needs a real CFD
-    solve per candidate, and an evolutionary search wants thousands of them.
+    Prefer this to :class:`DragCoefficient` as the thing to minimize. A shape
+    can lower its coefficient by growing a bigger frontal area, which makes the
+    number better and the fuel bill worse.
 
-    The three routes worth weighing before writing any code (ROADMAP.md item 4):
-
-    * **Shell out to OpenFOAM per candidate.** Trustworthy, and far too slow to
-      sit inside a generation loop unless the population is tiny and the budget
-      is hours.
-    * **A fast approximate solver -- panel method or lattice Boltzmann.** Good
-      enough to rank candidates against each other, which is all a selection
-      step actually needs. Probably where this should start.
-    * **A surrogate trained on a few hundred real solves.** Fastest per
-      evaluation by far, and the one that most easily produces confident
-      nonsense once the search walks outside the training distribution.
-
-    Note that for shape optimization the geometry side is already settled: use
-    :class:`~whittle.geometry.ffd.FFDLattice`, which keeps the surface closed
-    and the mesh valid for whatever solver you land on.
+    ``reference`` divides the result, so it sits near 1 next to other
+    objectives in a :class:`~whittle.fitness.base.WeightedSum`; pass the
+    starting shape's drag area.
     """
 
     name = "drag"
 
-    def __init__(self, *, velocity: float = 1.0, density: float = 1.225) -> None:
-        self.velocity = float(velocity)
-        self.density = float(density)
+    def __init__(self, flow: Vector3 | DragModel, *, reference: float = 1.0) -> None:
+        self.model = flow if isinstance(flow, DragModel) else DragModel(flow)
+        self.reference = float(reference)
 
     def __call__(self, candidate: Candidate) -> float:
-        raise NotImplementedError(
-            "DragCoefficient needs a flow solver, which is ROADMAP.md item 4. "
-            "See the class docstring for the three approaches and their trade-offs."
-        )
+        return self.model(candidate.mesh).drag_area / self.reference
+
+
+class DragCoefficient:
+    """Drag coefficient on the candidate's own frontal area."""
+
+    name = "cd"
+
+    def __init__(self, flow: Vector3 | DragModel) -> None:
+        self.model = flow if isinstance(flow, DragModel) else DragModel(flow)
+
+    def __call__(self, candidate: Candidate) -> float:
+        return self.model(candidate.mesh).cd

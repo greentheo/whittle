@@ -57,3 +57,14 @@ def test_history_is_recorded() -> None:
     )
     assert len(seen) > 0
     assert seen[0][0] == 1
+
+
+def test_a_warm_start_is_never_lost(unit_cube: Mesh) -> None:
+    lattice = FFDLattice(unit_cube, divisions=(1, 1, 1), max_displacement=0.5)
+    objective = WeightedSum({__import__("whittle").MeshVolume(): 1.0})
+    start = np.full(lattice.n_params, 0.0)
+    # Pull the top face down: a good, but not optimal, place to begin.
+    start.reshape(2, 2, 2, 3)[:, :, 1, 2] = -0.4
+    start_value = objective(__import__("whittle").Candidate(start, lattice))
+    result = evolve(lattice, objective, seed=0, maxiter=3, popsize=4, x0=start, spread=0.05)
+    assert result.fitness <= start_value + 1e-12

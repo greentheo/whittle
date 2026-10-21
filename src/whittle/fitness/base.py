@@ -51,8 +51,10 @@ class Candidate:
 class Objective(Protocol):
     """A scalar to minimize."""
 
-    #: Short label, used in reporting and history.
-    name: str
+    @property
+    def name(self) -> str:
+        """Short label, used in reporting and history."""
+        ...
 
     def __call__(self, candidate: Candidate) -> float:
         ...
