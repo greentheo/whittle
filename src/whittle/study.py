@@ -31,10 +31,34 @@ from .optimize.evolve import evolve
 from .physics.drag import DragModel, DragReport
 from .physics.fea import FEAResult, Load, Material, Support, VoxelFEA, material
 from .sweep import Column, Station, Sweep
-from .types import BoolArray, Mesh, Vector3
+from .types import BoolArray, FloatArray, Mesh, Vector3
 from .voxel import Grid
 
 Box = tuple[Vector3, Vector3]
+
+
+def select(
+    grid: Grid,
+    within: BoolArray,
+    *,
+    at: Vector3 | None = None,
+    box: Box | None = None,
+    radius: float | None = None,
+    normal: Vector3 | None = None,
+    depth: float | None = None,
+) -> BoolArray:
+    """The voxels of ``within`` at a point, on the face under a point, or in a box."""
+    if (at is None) == (box is None):
+        raise ValueError("give exactly one of at= or box=")
+    if box is not None:
+        mask: BoolArray = grid.box(*box) & within
+        if not mask.any():
+            raise ValueError(f"box {box} contains none of the part")
+        return mask
+    assert at is not None
+    if normal is not None:
+        return grid.patch(at, normal, within, depth=depth, radius=radius)
+    return grid.near(at, within, radius=radius)
 
 
 class LoadStudy:
@@ -99,17 +123,9 @@ class LoadStudy:
         depth: float | None = None,
     ) -> BoolArray:
         """The part's voxels at a point, on the face under a point, or in a box."""
-        if (at is None) == (box is None):
-            raise ValueError("give exactly one of at= or box=")
-        if box is not None:
-            mask = self.grid.box(*box) & self.solid
-            if not mask.any():
-                raise ValueError(f"box {box} contains none of the part")
-            return mask
-        assert at is not None
-        if normal is not None:
-            return self.grid.patch(at, normal, self.solid, depth=depth, radius=radius)
-        return self.grid.near(at, self.solid, radius=radius)
+        return select(
+            self.grid, self.solid, at=at, box=box, radius=radius, normal=normal, depth=depth
+        )
 
     def support(
         self,
@@ -384,46 +400,18 @@ class FlowStudy:
             budgets = list(np.linspace(0.0, remove_up_to, stations))[1:]
         else:
             budgets = sorted(float(b) for b in stations if b > 0)
-        lattice = self.lattice()
-        volume = self.base.volume
-        reference = self.model(self.base).drag_area
-        constraints: dict[Objective, float] = {
-            StayInside(self.grid, self.solid): 5.0,
-            NoFolding(self.base): 10.0,
-        }
-        if self.keep_boxes:
-            constraints[KeepOut(self.keep_boxes)] = 20.0
-        drag = DragArea(self.model, reference=reference)
-
+        carver = Carver(self, effort=effort, seed=seed)
+        lattice, volume, reference = carver.lattice, carver.volume, carver.reference
         genome = np.zeros(lattice.n_params)
         designs = [(0.0, genome, self.base)]
         best = 1.0
-        generations = max(5, int(round(30 * effort)))
         for number, budget in enumerate(budgets, start=1):
-            objective = WeightedSum({drag: 1.0, VolumeBudget(volume, budget): 20.0, **constraints})
 
-            def step(generation: int, _: float, done: int = number - 1) -> None:
+            def step(fraction: float, done: int = number - 1) -> None:
                 if progress is not None:
-                    fraction = (done + min(generation, generations) / generations) / len(budgets)
-                    progress(fraction)
+                    progress((done + fraction) / len(budgets))
 
-            result = evolve(
-                lattice,
-                objective,
-                seed=seed,
-                maxiter=generations,
-                popsize=6,
-                x0=genome,
-                spread=0.15 if number == 1 else 0.08,
-                callback=step,
-            )
-            # Every penalty is normalized -- a fraction of the volume, of a voxel,
-            # of the faces, of a keep box -- so a thousandth of one is invisible.
-            feasible = all(v <= 1e-3 for k, v in result.terms.items() if k != "drag")
-            # Never let the slider get worse as it goes. A larger budget can
-            # always fall back on the smaller one's design, which still fits.
-            if feasible and result.terms["drag"] < best:
-                genome, best = result.genome, result.terms["drag"]
+            genome, best = carver.carve(budget, genome, best, wide=number == 1, progress=step)
             mesh = lattice.build(genome)
             designs.append((budget, genome, mesh))
             if callback is not None:
@@ -459,6 +447,78 @@ class FlowStudy:
                 Column("force_n", f"N @{self.speed_kmh:g}km/h", "{:.1f}"),
             ],
         )
+
+
+class Carver:
+    """One step of a flow study's carving: the best shape for one removal budget.
+
+    Built once per study, because the lattice, the constraints and the
+    reference drag do not change between budgets; :meth:`carve` is then
+    called for each budget, warm-started from a neighbouring budget's design.
+    A :class:`~whittle.dual.DualStudy` uses it to add budgets out of order,
+    wherever its map most needs filling in.
+    """
+
+    def __init__(self, study: FlowStudy, *, effort: float = 1.0, seed: int | None = 0) -> None:
+        self.lattice = study.lattice()
+        self.volume = study.base.volume
+        self.reference = study.model(study.base).drag_area
+        self.generations = max(5, int(round(30 * effort)))
+        self.seed = seed
+        self.constraints: dict[Objective, float] = {
+            StayInside(study.grid, study.solid): 5.0,
+            NoFolding(study.base): 10.0,
+        }
+        if study.keep_boxes:
+            self.constraints[KeepOut(study.keep_boxes)] = 20.0
+        self.drag = DragArea(study.model, reference=self.reference)
+
+    def carve(
+        self,
+        budget: float,
+        start: FloatArray,
+        start_drag: float,
+        *,
+        wide: bool = False,
+        progress: Callable[[float], None] | None = None,
+    ) -> tuple[FloatArray, float]:
+        """The lowest-drag genome found removing at most ``budget``, and its relative drag.
+
+        Searches around ``start`` -- more widely when ``wide``, for the first
+        step away from the original -- and keeps ``start`` if nothing feasible
+        beats ``start_drag``. A larger budget can always fall back on a smaller
+        one's design, which still fits, so a sweep never gets worse as it goes.
+        """
+        objective = WeightedSum(
+            {self.drag: 1.0, VolumeBudget(self.volume, budget): 20.0, **self.constraints}
+        )
+        generations = self.generations
+
+        def step(generation: int, _: float) -> None:
+            if progress is not None:
+                progress(min(generation, generations) / generations)
+
+        result = evolve(
+            self.lattice,
+            objective,
+            seed=self.seed,
+            maxiter=generations,
+            popsize=6,
+            x0=start,
+            spread=0.15 if wide else 0.08,
+            callback=step,
+        )
+        # Every penalty is normalized -- a fraction of the volume, of a voxel,
+        # of the faces, of a keep box -- so a thousandth of one is invisible.
+        # The budget gets a percent: a short search lands a hair over it, and
+        # what a station reports is the volume it really removed, not its budget.
+        slack = {"over_budget": 0.01}
+        feasible = all(
+            v <= slack.get(k, 1e-3) for k, v in result.terms.items() if k != "drag"
+        )
+        if feasible and result.terms["drag"] < start_drag:
+            return result.genome, float(result.terms["drag"])
+        return start, start_drag
 
 
 def _mesher(grid: Grid, solid: BoolArray, smooth: float, relax: int) -> Callable[[], Mesh]:

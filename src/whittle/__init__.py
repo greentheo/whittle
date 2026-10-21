@@ -11,6 +11,7 @@ See README.md for what is implemented and how far to trust it.
 """
 
 from . import io, shapes
+from .dual import DualStudy, DualSweep
 from .fitness import (
     AnchorConnectivity,
     Candidate,
@@ -32,6 +33,7 @@ from .physics import (
     DragModel,
     DragReport,
     FEAResult,
+    FieldLoad,
     Load,
     Material,
     Support,
@@ -54,9 +56,12 @@ __all__ = [
     "DragCoefficient",
     "DragModel",
     "DragReport",
+    "DualStudy",
+    "DualSweep",
     "EvolutionResult",
     "FEAResult",
     "FFDLattice",
+    "FieldLoad",
     "FlowStudy",
     "Grid",
     "KeepOut",

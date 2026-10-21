@@ -55,14 +55,16 @@
         <div class="segmented" role="tablist" aria-label="Study type">
           <button role="tab" id="tab-load" aria-selected="true" data-kind="load">Strength</button>
           <button role="tab" id="tab-flow" aria-selected="false" data-kind="flow">Airflow</button>
+          <button role="tab" id="tab-dual" aria-selected="false" data-kind="dual">Both</button>
         </div>
+        <p class="hint" id="dual-hint" hidden>Carve the outside for drag and lighten the inside for its loads, together. Place where it is held below; the wind loads come from each carved shape.</p>
 
         <div id="load-panel" class="kind-panel">
           <p class="hint">Click the part to place where it is held and what pushes on it.</p>
           <div class="tools" role="group" aria-label="Place">
             <button class="tool" data-tool="support" aria-pressed="false"><i class="dot support"></i>Support</button>
             <button class="tool" data-tool="load" aria-pressed="false"><i class="dot load"></i>Load</button>
-            <button class="tool" data-tool="keep" aria-pressed="false"><i class="dot keep"></i>Keep</button>
+            <button class="tool" data-tool="keep" id="keep-tool" aria-pressed="false"><i class="dot keep"></i>Keep</button>
           </div>
           <div class="field-row">
             <div class="segmented small" role="radiogroup" aria-label="What a click selects">
@@ -136,7 +138,7 @@
                 <option value="z">Across Z</option>
               </select>
             </label>
-            <label class="field grow">
+            <label class="field grow" id="extruded-field">
               <span>Long part along</span>
               <select id="extruded-select">
                 <option value="">Not long</option>
@@ -156,13 +158,21 @@
             <label><input type="checkbox" value="+y"> +Y</label>
           </fieldset>
           <label class="check">
-            <input type="checkbox" id="keep-box-toggle"> Protect a box inside (cargo, mattress…)
+            <input type="checkbox" id="keep-box-toggle"> <span id="keep-box-label">Protect a box inside (cargo, mattress…)</span>
           </label>
           <div id="keep-box-fields" class="box-fields" hidden>
             <span>from</span>
             <input type="number" id="kb-x0" aria-label="Box minimum x"><input type="number" id="kb-y0" aria-label="Box minimum y"><input type="number" id="kb-z0" aria-label="Box minimum z">
             <span>to</span>
             <input type="number" id="kb-x1" aria-label="Box maximum x"><input type="number" id="kb-y1" aria-label="Box maximum y"><input type="number" id="kb-z1" aria-label="Box maximum z">
+            <span class="dual-only">holds</span>
+            <label class="dual-only kg-field"><input type="number" id="cargo-kg" min="0" step="5" value="50" aria-label="Cargo mass in kilograms"> kg</label>
+          </div>
+          <div class="field-row dual-only">
+            <label class="field grow">
+              <span>Crosswind km/h</span>
+              <input type="number" id="crosswind-input" min="0" step="5" value="40">
+            </label>
           </div>
           <div class="field-row">
             <label class="field grow">
@@ -188,13 +198,23 @@
       <section class="panel">
         <h2>Sweep</h2>
         <label class="field">
-          <span>Remove up to <output id="remove-out">60%</output></span>
+          <span><span id="remove-label">Remove up to</span> <output id="remove-out">60%</output></span>
           <input type="range" id="remove-input" min="5" max="90" step="5" value="60">
         </label>
         <label class="field compact-inline">
-          <span>Stations</span>
+          <span id="stations-label">Stations</span>
           <input type="number" id="stations-input" min="2" max="16" value="7">
         </label>
+        <div class="dual-only">
+          <label class="field">
+            <span>Lighten up to <output id="lighten-out">60%</output></span>
+            <input type="range" id="lighten-input" min="10" max="90" step="5" value="60">
+          </label>
+          <label class="field compact-inline">
+            <span>Weight steps</span>
+            <input type="number" id="weights-input" min="2" max="10" value="5">
+          </label>
+        </div>
         <div class="run-row">
           <button class="button primary" id="run-button" disabled>Run sweep</button>
           <button class="button" id="cancel-button" hidden>Cancel</button>
@@ -229,15 +249,32 @@
         <div class="stale" id="stale" hidden>The set-up changed since this sweep ran. Run it again to update.</div>
         <div class="slider-block">
           <div class="slider-head">
-            <div class="station-title"><span id="station-removed">0%</span> removed</div>
+            <div class="station-title"><span id="station-removed">0%</span> <span id="station-sub">removed</span></div>
             <div class="slider-actions">
               <label class="check"><input type="checkbox" id="heat-toggle" checked> Heatmap</label>
               <label class="check"><input type="checkbox" id="ghost-toggle" checked> Original</label>
+              <label class="check" title="Slice the part along its middle to see what lightening did inside"><input type="checkbox" id="cut-toggle"> Cut in half</label>
               <a class="button" id="download-button" href="#" download>Download STL</a>
             </div>
           </div>
-          <input type="range" id="station-slider" min="0" max="0" step="1" value="0" aria-label="Station: conservative to extreme">
-          <div class="slider-ends"><span>Conservative</span><span id="slider-ticks" class="slider-ticks"></span><span>Extreme</span></div>
+          <div id="single-slider">
+            <input type="range" id="station-slider" min="0" max="0" step="1" value="0" aria-label="Station: conservative to extreme">
+            <div class="slider-ends"><span>Conservative</span><span id="slider-ticks" class="slider-ticks"></span><span>Extreme</span></div>
+          </div>
+          <div id="dual-sliders" class="dual-sliders" hidden>
+            <label class="dual-slider">
+              <span class="dual-slider-label">Shape for the wind <output id="aero-out"></output></span>
+              <input type="range" id="aero-slider" min="0" max="0" step="1" value="0">
+            </label>
+            <label class="dual-slider">
+              <span class="dual-slider-label">Lighten <output id="weight-out"></output></span>
+              <input type="range" id="weight-slider" min="0" max="0" step="1" value="0">
+            </label>
+            <label class="field compact-inline safety-field">
+              <span>At least</span>
+              <input type="number" id="min-safety" min="0" step="0.5" value="3"> <span>× safe</span>
+            </label>
+          </div>
         </div>
         <div class="results-body">
           <div class="tiles" id="tiles"></div>

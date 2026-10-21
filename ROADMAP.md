@@ -18,6 +18,12 @@ In build order.
   progress and cancel; slide through the stations with stress or drag
   heatmaps, trade-off charts, and STL download. Standard library server,
   three.js page.
+- **Both at once.** `DualStudy` nests the two: carve the outside to a few
+  drag budgets, lighten inside each shape (keeping its skin) under the user's
+  loads plus that shape's own wind -- head-on and in a crosswind, built by the
+  crossflow principle -- and refine along the carving axis where neighbours
+  differ most. FEA load cases and distributed loads came with it. In the GUI
+  as a third mode, with two sliders and a map.
 - **A fast approximate drag model** (the "panel method" route of old item 4,
   done as an engineering model rather than a potential-flow solve, because
   potential flow predicts zero drag). Calibrated to textbook high-Reynolds
@@ -80,6 +86,17 @@ The real reason to keep a population method around.
 A flow station runs ten thousand independent drag evaluations; scipy's
 `workers=` passes straight through `evolve()` and has not been profiled. BESO
 is sequential by nature, so the structural side waits on item 1 instead.
+
+## 6. Open structures in the wind
+
+`DualStudy` keeps the outer skin, which is what makes its coupling one-way:
+lightening never changes the outside, so it never changes the drag. An open
+structure -- a rack frame, a lattice fairing, a bracket that could lose a
+corner -- would rather punch through, and then every lightening step changes
+the drag and the two have to alternate. That needs a flow representation that
+can hold holes, which the deformation lattice cannot: the drag model scoring
+the marching-cubes surface of a density field is the obvious route, and the
+terracing it brings is the obvious problem.
 
 ## Open questions
 

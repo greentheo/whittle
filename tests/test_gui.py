@@ -95,6 +95,37 @@ def test_a_flow_study_runs_with_a_signed_drag_heatmap() -> None:
     assert heat.max() > 0
 
 
+def test_a_dual_study_returns_a_map_and_carved_shapes() -> None:
+    app = App()
+    part = app.example("roof-pod")
+    assert part["setup"]["kind"] == "dual"
+    setup = dict(part["setup"])
+    setup.update(
+        part=part["id"],
+        resolution=16,
+        structureResolution=16,
+        aeroStations=2,
+        weightStations=2,
+        effort=0.2,
+    )
+    status = _wait(app, app.start(setup)["id"], timeout=120.0)
+    assert status["state"] == "done", status["error"]
+    result = status["result"]
+    assert result["dual"] is True
+    assert len(result["rows"]) == 2
+    assert {s["row"] for s in result["stations"]} == {0, 1}
+    assert all("side_n" in s["metrics"] for s in result["stations"])
+    # Each design has a stress heatmap; each carved shape a drag one.
+    design = app.station_mesh(status["id"], len(result["stations"]) - 1)
+    assert _floats(design["heat"]).max() > 0
+    shape = app.shape_mesh(status["id"], 1)
+    assert len(_floats(shape["heat"])) == len(_floats(shape["positions"])) // 3
+    with pytest.raises(BadRequest, match=r"no such shape"):
+        app.shape_mesh(status["id"], 9)
+    with pytest.raises(BadRequest, match=r"support"):
+        app.start({"kind": "dual", "part": part["id"], "supports": []})
+
+
 def test_previewing_a_placement_returns_the_voxels_it_selects() -> None:
     app = App()
     part = app.example("shelf-bracket")

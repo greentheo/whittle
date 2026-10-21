@@ -3,8 +3,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from whittle import MATERIALS, Load, Support, VoxelFEA
-from whittle.physics.fea import _unit_stiffness, material
+from whittle import MATERIALS, FEAResult, Load, Support, VoxelFEA
+from whittle.physics.fea import FieldLoad, _unit_stiffness, material
 
 E_PLA = MATERIALS["pla"].youngs_modulus
 NU_PLA = MATERIALS["pla"].poisson_ratio
@@ -154,3 +154,58 @@ def test_material_lookup() -> None:
     assert material(MATERIALS["steel"]) is MATERIALS["steel"]
     with pytest.raises(ValueError, match=r"unknown material"):
         material("unobtainium")
+
+
+def test_load_cases_are_solved_separately_and_judged_together() -> None:
+    shape = (24, 4, 6)
+    clamp = np.zeros(shape, dtype=bool)
+    clamp[0] = True
+    tip = np.zeros(shape, dtype=bool)
+    tip[-1] = True
+    solid = np.ones(shape, dtype=bool)
+
+    def solve(*loads: Load) -> FEAResult:
+        return VoxelFEA(shape, loads=list(loads), supports=[Support(clamp)]).solve(solid)
+
+    down = solve(Load(tip, (0.0, 0.0, -10.0)))
+    side = solve(Load(tip, (0.0, 10.0, 0.0)))
+    both = solve(Load(tip, (0.0, 0.0, -10.0), case=0), Load(tip, (0.0, 10.0, 0.0), case=1))
+    assert both.case_compliance == pytest.approx((down.compliance, side.compliance))
+    assert both.compliance == pytest.approx(down.compliance + side.compliance)
+    # Stress is the worst case, voxel by voxel; deflection the worst of either.
+    assert np.allclose(both.von_mises, np.maximum(down.von_mises, side.von_mises))
+    assert both.max_displacement == pytest.approx(max(down.max_displacement, side.max_displacement))
+    # The beam is half as deep sideways (4 against 6), so that case dominates.
+    assert side.compliance > down.compliance
+
+
+def test_a_field_load_matches_the_same_force_spread_by_hand() -> None:
+    shape = (20, 4, 4)
+    clamp = np.zeros(shape, dtype=bool)
+    clamp[0] = True
+    tip = np.zeros(shape, dtype=bool)
+    tip[-1] = True
+    solid = np.ones(shape, dtype=bool)
+    forces = np.zeros((*shape, 3))
+    forces[-1, :, :, 2] = -12.0 / tip.sum()
+    held = [Support(clamp)]
+    field = VoxelFEA(shape, loads=[FieldLoad(forces)], supports=held).solve(solid)
+    point = VoxelFEA(shape, loads=[Load(tip, (0, 0, -12.0))], supports=held).solve(solid)
+    # Not identical -- a Load spreads over unique nodes, a FieldLoad over each
+    # voxel's eight -- but the same total force at the same place.
+    assert field.compliance == pytest.approx(point.compliance, rel=0.05)
+
+
+def test_a_field_load_on_floating_material_is_unsupported() -> None:
+    shape = (12, 4, 6)
+    clamp = np.zeros(shape, dtype=bool)
+    clamp[0] = True
+    solid = np.zeros(shape, dtype=bool)
+    solid[:, :, :3] = True
+    solid[4:8, :, 5] = True  # a slab floating above the beam
+    forces = np.zeros((*shape, 3))
+    forces[4:8, :, 5, 2] = -1.0
+    fea = VoxelFEA(shape, loads=[FieldLoad(forces)], supports=[Support(clamp)])
+    assert not fea.solve(solid).supported
+    with pytest.raises(ValueError, match=r"forces must have shape"):
+        VoxelFEA(shape, loads=[FieldLoad(np.zeros((2, 2, 2, 3)))], supports=[Support(clamp)])

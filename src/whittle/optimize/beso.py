@@ -143,6 +143,13 @@ def beso(
     note = ""
     for target in targets:
         count = max(int(round((1.0 - target) * n_domain)), n_forced)
+        if stations and count >= int(stations[-1].solid.sum()):
+            # Only material that must stay is left: this station would repeat the last.
+            note = note or (
+                f"stopped at {stations[-1].removed:.0%} removed: what is left is material "
+                "that must stay -- loads, supports, kept regions"
+            )
+            break
         # Descend to this station's volume, a step at a time.
         while int(solid.sum()) > count:
             alpha = sensitivity(current)

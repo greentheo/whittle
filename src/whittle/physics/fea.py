@@ -75,6 +75,9 @@ class Material:
 #: infill both stiffness and strength drop roughly in proportion to the infill
 #: -- so read a safety factor below about 3 on a printed part as "test it",
 #: not as "fine". Plywood is not isotropic and is modelled as if it were.
+#: XPS is extruded-polystyrene insulation board, the core of a carved-foam
+#: build: bare foam, without the glass or carbon skin that usually goes over
+#: it, so a design that survives in it has strength to spare once skinned.
 MATERIALS: dict[str, Material] = {
     "pla": Material("PLA (printed)", 3500.0, 0.36, 40.0, 1.24),
     "petg": Material("PETG (printed)", 2100.0, 0.38, 35.0, 1.27),
@@ -83,6 +86,7 @@ MATERIALS: dict[str, Material] = {
     "aluminum": Material("Aluminium 6061-T6", 69000.0, 0.33, 275.0, 2.70),
     "steel": Material("Mild steel", 200000.0, 0.29, 250.0, 7.85),
     "plywood": Material("Birch plywood", 8000.0, 0.30, 30.0, 0.68),
+    "xps": Material("XPS foam board", 15.0, 0.20, 0.25, 0.035),
 }
 
 
@@ -103,10 +107,37 @@ class Load:
 
     ``force`` is the *total*, in newtons, spread evenly over the nodes of the
     region's voxels. Ten kilograms hanging from a hook is ``(0, 0, -98.1)``.
+
+    ``case`` groups loads into load cases. Loads in the same case act at the
+    same time; different cases are separate situations the part must survive
+    one at a time -- a roof box driving straight into the wind, and the same
+    box in a crosswind.
     """
 
     region: BoolArray
     force: Vector3
+    case: int = 0
+
+
+@dataclass(frozen=True)
+class FieldLoad:
+    """A force on every voxel that carries one: a pressure spread over a surface.
+
+    ``forces`` has the grid's shape plus a trailing 3, in newtons per voxel.
+    This is how wind gets onto a part: the drag model's pressure on each face
+    of the surface, handed to the voxel under that face
+    (:func:`whittle.dual.wind_forces`). A distributed load does not
+    concentrate stress where it is applied, so unlike a :class:`Load` its
+    voxels are not kept out of :meth:`VoxelFEA.peak_stress`.
+    """
+
+    forces: FloatArray
+    case: int = 0
+
+    @property
+    def region(self) -> BoolArray:
+        mask: BoolArray = np.any(self.forces != 0.0, axis=-1)
+        return mask
 
 
 @dataclass(frozen=True)
@@ -130,11 +161,13 @@ class FEAResult:
     supported: bool
     #: Work done by the loads, ``F . u`` -- N mm, which is mJ. Lower is stiffer.
     compliance: float
-    #: Nodal displacement, shape ``(nx + 1, ny + 1, nz + 1, 3)``.
+    #: Nodal displacement, shape ``(nx + 1, ny + 1, nz + 1, 3)``. Of the first
+    #: load case, when there are several.
     displacement: FloatArray
-    #: Strain energy per voxel, N mm. Where the part is working.
+    #: Strain energy per voxel, N mm, summed over load cases. Where the part is working.
     strain_energy: FloatArray
-    #: von Mises stress per voxel, the worst of its eight corners, MPa.
+    #: von Mises stress per voxel, the worst of its eight corners and of every
+    #: load case, MPa.
     von_mises: FloatArray
     #: The material actually analyzed: the input minus anything floating free.
     solid: BoolArray
@@ -142,12 +175,10 @@ class FEAResult:
     peak_stress: float
     converged: bool
     iterations: int
-
-    @property
-    def max_displacement(self) -> float:
-        if not self.supported:
-            return float("inf")
-        return float(np.linalg.norm(self.displacement, axis=-1).max())
+    #: The largest displacement of any node in any load case, mm.
+    max_displacement: float = float("inf")
+    #: Compliance of each load case on its own; ``compliance`` is their sum.
+    case_compliance: tuple[float, ...] = ()
 
 
 # Corner order of a hex element: x varies fastest, then y, then z.
@@ -218,7 +249,7 @@ class VoxelFEA:
         *,
         spacing: float = 1.0,
         material: str | Material = "pla",
-        loads: Sequence[Load],
+        loads: Sequence[Load | FieldLoad],
         supports: Sequence[Support],
     ) -> None:
         if not loads:
@@ -230,6 +261,9 @@ class VoxelFEA:
         self.material = _resolve(material)
         self.loads = list(loads)
         self.supports = list(supports)
+        for load in self.loads:
+            if isinstance(load, FieldLoad) and load.forces.shape != (*shape, 3):
+                raise ValueError(f"forces must have shape {(*shape, 3)}, got {load.forces.shape}")
         regions: list[BoolArray] = [item.region for item in self.loads]
         regions += [item.region for item in self.supports]
         for region in regions:
@@ -264,11 +298,24 @@ class VoxelFEA:
             [d @ _strain_displacement(c.astype(np.float64)) / self.spacing for c in _CORNERS]
         )
 
-        self.force = np.zeros(self.n_dof, dtype=np.float64)
+        # One force vector per load case, in case order.
+        self.cases = sorted({load.case for load in self.loads})
+        self.forces = np.zeros((len(self.cases), self.n_dof), dtype=np.float64)
+        n_nodes = int(node_id.size)
         for load in self.loads:
-            load_nodes = np.unique(nodes[load.region.ravel()])
-            for axis, f in enumerate(load.force):
-                self.force[3 * load_nodes + axis] += float(f) / len(load_nodes)
+            force = self.forces[self.cases.index(load.case)]
+            if isinstance(load, FieldLoad):
+                carrying = load.region.ravel()
+                corners = nodes[carrying].ravel()
+                per_voxel = load.forces.reshape(-1, 3)[carrying]
+                for axis in range(3):
+                    # Each voxel's force is shared equally by its eight nodes.
+                    share = np.repeat(per_voxel[:, axis] / 8.0, 8)
+                    force[axis::3] += np.bincount(corners, weights=share, minlength=n_nodes)
+            else:
+                load_nodes = np.unique(nodes[load.region.ravel()])
+                for axis, f in enumerate(load.force):
+                    force[3 * load_nodes + axis] += float(f) / len(load_nodes)
         self._fixed = np.zeros(self.n_dof, dtype=bool)
         support_mask = np.zeros(shape, dtype=bool)
         for support in self.supports:
@@ -280,7 +327,8 @@ class VoxelFEA:
         self._support_mask = support_mask
         attached = support_mask.copy()
         for load in self.loads:
-            attached |= load.region
+            if isinstance(load, Load):
+                attached |= load.region
         # Stress right where a load or support attaches is dominated by how the
         # attachment was modelled -- a force smeared over a few nodes, a face
         # held perfectly rigid -- rather than by the part. One voxel of margin.
@@ -307,7 +355,7 @@ class VoxelFEA:
         labels, _ = ndimage.label(solid)
         anchored = np.unique(labels[self._support_mask & solid])
         kept = np.isin(labels, anchored[anchored > 0])
-        if not all((load.region & kept).any() for load in self.loads):
+        if not all(self._reaches(load, kept) for load in self.loads):
             return self._unsupported(kept)
 
         elements = np.flatnonzero(kept.ravel())
@@ -347,35 +395,60 @@ class VoxelFEA:
             nonlocal iterations
             iterations += 1
 
-        u_free, info = cg(
-            operator,
-            self.force[free],
-            rtol=rtol,
-            maxiter=maxiter,
-            M=jacobi,
-            callback=count,
-        )
-        u = np.zeros(n_dof, dtype=np.float64)
-        u[free] = u_free
-
-        ue = u[edof]
         energy = np.zeros(int(np.prod(self.shape)), dtype=np.float64)
-        energy[elements] = 0.5 * np.einsum("ij,ij->i", ue @ ke, ue)
         vm = np.zeros_like(energy)
-        vm[elements] = np.max([_von_mises(ue @ corner.T) for corner in self._stress], axis=0)
+        compliances: list[float] = []
+        largest = 0.0
+        converged = True
+        first: FloatArray | None = None
+        # Each load case is its own solve. The design is judged on all of them:
+        # strain energy adds up, so material that works in either case is kept,
+        # and stress is the worst any case puts on a voxel.
+        for force in self.forces:
+            u_free, info = cg(
+                operator, force[free], rtol=rtol, maxiter=maxiter, M=jacobi, callback=count
+            )
+            converged &= info == 0
+            u = np.zeros(n_dof, dtype=np.float64)
+            u[free] = u_free
+            ue = u[edof]
+            energy[elements] += 0.5 * np.einsum("ij,ij->i", ue @ ke, ue)
+            stress = np.max([_von_mises(ue @ corner.T) for corner in self._stress], axis=0)
+            vm[elements] = np.maximum(vm[elements], stress)
+            compliances.append(float(force[free] @ u_free))
+            largest = max(largest, float(np.linalg.norm(u.reshape(-1, 3), axis=1).max()))
+            if first is None:
+                first = u
+        assert first is not None
         von_mises = vm.reshape(self.shape)
         nx, ny, nz = self.shape
         return FEAResult(
             supported=True,
-            compliance=float(self.force[free] @ u_free),
-            displacement=u.reshape(nx + 1, ny + 1, nz + 1, 3),
+            compliance=float(sum(compliances)),
+            displacement=first.reshape(nx + 1, ny + 1, nz + 1, 3),
             strain_energy=energy.reshape(self.shape),
             von_mises=von_mises,
             solid=kept,
             peak_stress=self.peak_stress(von_mises, kept),
-            converged=info == 0,
+            converged=converged,
             iterations=iterations,
+            max_displacement=largest,
+            case_compliance=tuple(compliances),
         )
+
+    @staticmethod
+    def _reaches(load: Load | FieldLoad, kept: BoolArray) -> bool:
+        """Whether a load is carried by the material connected to a support.
+
+        A point load must touch that material. A distributed one may lose a
+        sliver -- a voxel of surface the meshing left floating -- but not more
+        than 1% of its force, or the design is ignoring a real part of its load.
+        """
+        if isinstance(load, Load):
+            return bool((load.region & kept).any())
+        magnitude = np.linalg.norm(load.forces, axis=-1)
+        total = float(magnitude.sum())
+        return total == 0.0 or float(magnitude[~kept].sum()) <= 0.01 * total
 
     def peak_stress(
         self, von_mises: FloatArray, solid: BoolArray, *, percentile: float = 99.0
@@ -409,6 +482,8 @@ class VoxelFEA:
             peak_stress=float("inf"),
             converged=False,
             iterations=0,
+            max_displacement=float("inf"),
+            case_compliance=tuple(float("inf") for _ in self.cases),
         )
 
 

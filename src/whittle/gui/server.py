@@ -32,6 +32,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 import numpy as np
 
 from .. import io
+from ..dual import DualStudy, DualSweep
 from ..physics.drag import DragReport
 from ..physics.fea import MATERIALS, FEAResult
 from ..study import Box, FlowStudy, LoadStudy
@@ -81,8 +82,11 @@ class Job:
     error: str = ""
     started: float = 0.0
     finished: float = 0.0
-    study: LoadStudy | FlowStudy | None = None
+    study: LoadStudy | FlowStudy | DualStudy | None = None
     sweep: Sweep | None = None
+    dual: DualSweep | None = None
+    #: Every station, in order: a sweep's stations, or a dual map's row by row.
+    stations: list[Any] = field(default_factory=list)
     heat_max: float = 1.0
     cancel: threading.Event = field(default_factory=threading.Event)
     meshes: dict[int, dict[str, Any]] = field(default_factory=dict)
@@ -181,10 +185,12 @@ class App:
 
     def start(self, body: dict[str, Any]) -> dict[str, Any]:
         part = self._part(body.get("part"))
-        if body.get("kind") not in ("load", "flow"):
-            raise BadRequest("kind must be 'load' or 'flow'")
+        if body.get("kind") not in ("load", "flow", "dual"):
+            raise BadRequest("kind must be 'load', 'flow' or 'dual'")
         if body["kind"] == "load" and (not body.get("supports") or not body.get("loads")):
             raise BadRequest("place at least one support and one load first")
+        if body["kind"] == "dual" and not body.get("supports"):
+            raise BadRequest("place at least one support first -- where the part is held")
         job = Job(uuid.uuid4().hex[:12], part, body)
         with self._lock:
             self.jobs[job.id] = job
@@ -210,8 +216,10 @@ class App:
         try:
             if job.kind == "load":
                 self._run_load(job, progress)
-            else:
+            elif job.kind == "flow":
                 self._run_flow(job, progress)
+            else:
+                self._run_dual(job, progress)
             job.state, job.progress = "done", 1.0
         except Cancelled:
             job.state = "cancelled"
@@ -245,8 +253,8 @@ class App:
             stations=_int(s, "stations", 7, 2, 16),
             progress=progress,
         )
-        peaks = [st.metrics["peak_stress_mpa"] for st in job.sweep]
-        job.heat_max = float(max(p for p in peaks if np.isfinite(p)))
+        job.stations = list(job.sweep)
+        job.heat_max = _peak(job.stations)
 
     def _run_flow(self, job: Job, progress: Callable[[float], None]) -> None:
         s = job.settings
@@ -272,9 +280,49 @@ class App:
             effort=_float(s, "effort", 1.0, 0.1, 4.0),
             progress=progress,
         )
+        job.stations = list(job.sweep)
         original = job.sweep.original
         heat = _drag_heat(original.mesh, original.analysis)
         job.heat_max = float(np.percentile(np.abs(heat), 99)) or 1.0
+
+    def _run_dual(self, job: Job, progress: Callable[[float], None]) -> None:
+        s = job.settings
+        material = str(s.get("material", "pla"))
+        if material not in MATERIALS:
+            raise BadRequest(f"unknown material {material!r}")
+        try:
+            study = DualStudy(
+                job.part.mesh,
+                flow=_vector(s, "flow"),
+                material=material,
+                speed_kmh=_float(s, "speedKmh", 110.0, 1.0, 400.0),
+                crosswind_kmh=_float(s, "crosswindKmh", 40.0, 0.0, 200.0),
+                resolution=_int(s, "resolution", 40, 12, 96),
+                structure_resolution=_int(s, "structureResolution", 48, 8, 128),
+                detail=_int(s, "detail", 2, 1, 4),
+                mirror=_axis(s.get("mirror")),
+                flat=[str(side) for side in s.get("flat", [])],
+                skin=_int(s, "skin", 1, 1, 4),
+            )
+            for item in s.get("supports", []):
+                study.support(**_region(item))
+            for item in s.get("loads", []):
+                study.load(_vector(item, "force"), **_region(item))
+            for cargo in s.get("cargo", []):
+                study.cargo(_box(cargo.get("box")), kg=_float(cargo, "kg", 0.0, 0.0, 1e5))
+        except ValueError as error:
+            raise BadRequest(str(error)) from error
+        job.study = study
+        job.dual = study.sweep(
+            remove_up_to=_float(s, "removeUpTo", 0.25, 0.02, 0.8),
+            aero_stations=_int(s, "aeroStations", 5, 2, 8),
+            lighten_up_to=_float(s, "lightenUpTo", 0.6, 0.05, 0.95),
+            weight_stations=_int(s, "weightStations", 5, 2, 10),
+            effort=_float(s, "effort", 1.0, 0.1, 4.0),
+            progress=progress,
+        )
+        job.stations = [station for _, _, station in job.dual.designs()]
+        job.heat_max = _peak(job.stations)
 
     def status(self, job_id: str) -> dict[str, Any]:
         job = self._job(job_id)
@@ -287,9 +335,41 @@ class App:
             "error": job.error,
             "elapsed": elapsed,
         }
-        if job.state == "done" and job.sweep is not None:
+        if job.state == "done" and job.dual is not None:
+            payload["result"] = self._dual_result(job, job.dual)
+        elif job.state == "done" and job.sweep is not None:
             payload["result"] = self._result(job, job.sweep)
         return payload
+
+    def _dual_result(self, job: Job, dual: DualSweep) -> dict[str, Any]:
+        assert isinstance(job.study, DualStudy)
+        rows: list[dict[str, Any]] = []
+        stations: list[dict[str, Any]] = []
+        for i, row in enumerate(dual.rows):
+            rows.append(
+                {"removed": row.removed, "drag": row.drag, "note": row.note, "first": len(stations)}
+            )
+            for j, station in enumerate(row.stations):
+                stations.append(
+                    {
+                        "row": i,
+                        "column": j,
+                        "removed": station.removed,
+                        "metrics": _finite(station.metrics),
+                    }
+                )
+        return {
+            "dual": True,
+            "columns": [
+                {"key": c.key, "label": c.label, "format": c.format} for c in dual.columns
+            ],
+            "rows": rows,
+            "stations": stations,
+            "note": "",
+            "heatMax": job.heat_max,
+            "heat": {"label": "von Mises stress", "unit": "MPa", "signed": False},
+            "strength": job.study.material.strength,
+        }
 
     def _result(self, job: Job, sweep: Sweep) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -315,7 +395,7 @@ class App:
         if index not in job.meshes:
             mesh = station.mesh
             if isinstance(station.analysis, FEAResult):
-                assert isinstance(job.study, LoadStudy)
+                assert isinstance(job.study, LoadStudy | DualStudy)
                 heat = _stress_heat(mesh, station.analysis, job.study.grid)
             elif isinstance(station.analysis, DragReport):
                 heat = _drag_heat(mesh, station.analysis)
@@ -323,6 +403,16 @@ class App:
                 heat = None
             job.meshes[index] = mesh_payload(mesh, heat)
         return job.meshes[index]
+
+    def shape_mesh(self, job_id: str, row: int) -> dict[str, Any]:
+        """The carved outside of one row of a dual map, with its drag heatmap."""
+        job = self._job(job_id)
+        if job.dual is None:
+            raise BadRequest("only a dual study has carved shapes")
+        if not 0 <= row < len(job.dual.rows):
+            raise BadRequest("no such shape")
+        shape = job.dual.rows[row]
+        return mesh_payload(shape.shape, _drag_heat(shape.shape, shape.report))
 
     def station_stl(self, job_id: str, index: int) -> tuple[bytes, str]:
         job = self._job(job_id)
@@ -337,11 +427,11 @@ class App:
         return job
 
     def _station(self, job: Job, index: int) -> Any:
-        if job.sweep is None:
+        if not job.stations:
             raise BadRequest("that study has not finished")
-        if not 0 <= index < len(job.sweep):
+        if not 0 <= index < len(job.stations):
             raise BadRequest("no such station")
-        return job.sweep[index]
+        return job.stations[index]
 
 
 # -- payload helpers -------------------------------------------------------------
@@ -396,6 +486,13 @@ def _drag_heat(mesh: Mesh, report: object) -> FloatArray:
     return result
 
 
+def _peak(stations: list[Any]) -> float:
+    """The worst peak stress in a run: the top of every heatmap's scale, so slides compare."""
+    peaks = [st.metrics["peak_stress_mpa"] for st in stations]
+    finite = [p for p in peaks if np.isfinite(p)]
+    return float(max(finite)) if finite else 1.0
+
+
 def _b64(array: np.ndarray) -> str:
     return base64.b64encode(np.ascontiguousarray(array).tobytes()).decode("ascii")
 
@@ -423,6 +520,8 @@ def _box(value: object) -> Box:
 
 def _region(item: dict[str, Any]) -> dict[str, Any]:
     """The placement keywords of a support, load or keep, as the page sends it."""
+    if item.get("box") is not None:
+        return {"box": _box(item["box"])}
     region: dict[str, Any] = {"at": _vector(item, "at")}
     if item.get("normal") is not None:
         region["normal"] = _vector(item, "normal")
@@ -521,6 +620,9 @@ def make_handler(app: App) -> type[BaseHTTPRequestHandler]:
                         return self._send(data, "model/stl", filename)
                     if len(route) == 4:
                         return self._json(app.station_mesh(job_id, index))
+                if method == "GET" and len(route) == 4 and route[2] == "shapes":
+                    row = _int({"i": route[3]}, "i", 0, -1, 10_000)
+                    return self._json(app.shape_mesh(job_id, row))
             return self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
         def _body(self, limit: int) -> bytes:

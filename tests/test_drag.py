@@ -181,3 +181,12 @@ def test_an_endless_slice() -> None:
     assert long == pytest.approx(2.0 * short, rel=0.02)
     with pytest.raises(ValueError, match=r"at least 1"):
         DragModel((1.0, 0.0, 0.0), aspect=0.5)
+
+
+def test_face_forces_add_up_to_the_drag() -> None:
+    report = WIND(shapes.box((2.0, 1.0, 1.0), cell=0.1))
+    total = report.forces.sum(axis=0)
+    assert total @ report.flow == pytest.approx(report.drag_area)
+    # A body symmetric about the flow feels no side force and no lift head-on.
+    assert np.allclose(total[1:], 0.0, atol=1e-9 * report.drag_area)
+    assert report.force_vector(20.0) @ report.flow == pytest.approx(report.force(20.0))

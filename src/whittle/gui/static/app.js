@@ -29,6 +29,8 @@ const state = {
   result: null,
   station: 0,
   geometries: new Map(),
+  shapes: new Map(),
+  dual: { row: 0, column: 0 },
   stale: false,
   poll: null,
 };
@@ -80,6 +82,7 @@ const layers = {
   original: new THREE.Group(),
   station: new THREE.Group(),
   ghost: new THREE.Group(),
+  shape: new THREE.Group(),
   markers: new THREE.Group(),
   flow: new THREE.Group(),
   helpers: new THREE.Group(),
@@ -94,6 +97,21 @@ const ghostMaterial = new THREE.MeshBasicMaterial({
 });
 
 let originalMesh = null;
+
+// "Cut in half": a plane through the middle of the part, along y, keeping
+// the far half -- so from the default view you look straight at the cut, and
+// the ribs a lightened part hides behind its skin are in plain sight.
+renderer.localClippingEnabled = true;
+const cut = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+function applyCut() {
+  const on = $('cut-toggle').checked && Boolean(state.part);
+  if (on) cut.constant = -bounds().center.y;
+  for (const material of [partMaterial, heatMaterial, ghostMaterial]) {
+    material.clippingPlanes = on ? [cut] : [];
+    material.side = on ? THREE.DoubleSide : THREE.FrontSide;
+    material.needsUpdate = true;
+  }
+}
 
 function resize() {
   const { clientWidth: w, clientHeight: h } = viewport;
@@ -172,6 +190,11 @@ function drawHelpers() {
   layers.helpers.userData.step = step;
 }
 
+// Two significant figures: foam stresses are hundredths of an MPa, steel's hundreds.
+function sig(value) {
+  return Number(value.toPrecision(2)).toString();
+}
+
 function niceStep(raw) {
   const power = 10 ** Math.floor(Math.log10(raw));
   const unit = raw / power;
@@ -221,8 +244,8 @@ function drawLegend() {
   } else {
     $('legend-title').textContent = `Stress, MPa (material breaks near ${result.strength})`;
     $('legend-min').textContent = '0';
-    $('legend-mid').textContent = (top / 2).toFixed(1);
-    $('legend-max').textContent = top.toFixed(1);
+    $('legend-mid').textContent = sig(top / 2);
+    $('legend-max').textContent = sig(top);
   }
 }
 
@@ -234,7 +257,7 @@ async function loadInfo() {
   for (const example of state.info.examples) {
     const option = document.createElement('option');
     option.value = example.id;
-    option.textContent = `${example.name} (${example.kind === 'load' ? 'strength' : 'airflow'})`;
+    option.textContent = `${example.name} (${{ load: 'strength', flow: 'airflow', dual: 'both' }[example.kind]})`;
     option.title = example.description;
     examples.append(option);
   }
@@ -291,6 +314,9 @@ function setPart(payload) {
   clear(layers.station, false);
   state.geometries.forEach((geometry) => geometry.dispose());
   clear(layers.ghost);
+  clear(layers.shape, false);
+  state.shapes.forEach((geometry) => geometry.dispose());
+  state.shapes.clear();
   clear(layers.original);
   const geometry = geometryFrom(payload.mesh);
   originalMesh = new THREE.Mesh(geometry, partMaterial);
@@ -306,6 +332,7 @@ function setPart(payload) {
   $('part-info').textContent = payload.closed ? info : `${info} — not watertight, so results may be wrong`;
   $('part-info').classList.toggle('warn', !payload.closed);
   prefillKeepBox();
+  applyCut();
   showError('');
   renderItems();
   drawFlow();
@@ -319,14 +346,21 @@ const fmtLength = (v) => (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.t
 
 function setKind(kind) {
   state.kind = kind;
-  $('tab-load').setAttribute('aria-selected', String(kind === 'load'));
-  $('tab-flow').setAttribute('aria-selected', String(kind === 'flow'));
-  $('load-panel').hidden = kind !== 'load';
-  $('flow-panel').hidden = kind !== 'flow';
+  for (const k of ['load', 'flow', 'dual']) $(`tab-${k}`).setAttribute('aria-selected', String(kind === k));
+  // Both: the strength panel places supports and loads, the airflow panel
+  // shapes the wind, and a few controls only the dual study has appear.
+  document.body.classList.toggle('mode-dual', kind === 'dual');
+  $('load-panel').hidden = kind === 'flow';
+  $('flow-panel').hidden = kind === 'load';
+  $('dual-hint').hidden = kind !== 'dual';
+  $('keep-tool').hidden = kind === 'dual';
+  $('extruded-field').hidden = kind === 'dual';
+  $('keep-box-label').textContent = kind === 'dual' ? 'Cargo space that stays empty' : 'Protect a box inside (cargo, mattress…)';
+  $('remove-label').textContent = kind === 'dual' ? 'Carve up to' : 'Remove up to';
+  $('stations-label').textContent = kind === 'dual' ? 'Shapes' : 'Stations';
   setTool(null);
-  const remove = kind === 'load' ? 60 : 25;
-  $('remove-input').value = remove;
-  $('stations-input').value = kind === 'load' ? 7 : 6;
+  $('remove-input').value = kind === 'load' ? 60 : 25;
+  $('stations-input').value = { load: 7, flow: 6, dual: 5 }[kind];
   syncOutputs();
   drawFlow();
   if (state.part) frame();
@@ -397,6 +431,7 @@ async function addItem(item) {
 }
 
 function itemRegion(item) {
+  if (item.box) return { box: item.box };
   const region = { at: item.at };
   if (item.mode === 'face') region.normal = item.normal;
   if (item.radius != null) region.radius = item.radius;
@@ -465,7 +500,7 @@ function renderItems() {
 }
 
 function describe(item) {
-  const where = item.mode === 'face' ? 'face' : `${item.radius} mm around point`;
+  const where = item.box ? 'box' : item.mode === 'face' ? 'face' : `${item.radius} mm around point`;
   const voxels = item.count ? `, ${item.count} voxels` : '';
   if (item.type !== 'load') return `${where}${voxels}`;
   const newtons = Math.hypot(...item.force);
@@ -481,7 +516,7 @@ async function refreshPreviews() {
 
 function drawFlow() {
   clear(layers.flow);
-  if (!state.part || state.kind !== 'flow') return;
+  if (!state.part || state.kind === 'load') return;
   const { center, size } = bounds();
   const flow = new THREE.Vector3(...state.flow).normalize();
   const extent = size.length();
@@ -544,6 +579,21 @@ async function applySetup(setup) {
       await addItem({ type: 'load', at: l.at, normal: l.normal, mode: l.normal ? 'face' : 'point', radius: l.radius, force: l.force });
     }
   } else {
+    if (setup.kind === 'dual') {
+      $('material-select').value = setup.material;
+      $('load-resolution').value = setup.structureResolution;
+      $('crosswind-input').value = setup.crosswindKmh;
+      $('stations-input').value = setup.aeroStations;
+      $('lighten-input').value = Math.round(setup.lightenUpTo * 100);
+      $('weights-input').value = setup.weightStations;
+      for (const s of setup.supports || []) await addItem({ type: 'support', ...s, mode: s.box ? 'box' : (s.normal ? 'face' : 'point') });
+      for (const l of setup.loads || []) await addItem({ type: 'load', ...l, mode: l.box ? 'box' : (l.normal ? 'face' : 'point') });
+      const cargo = (setup.cargo || [])[0];
+      if (cargo) {
+        setup = { ...setup, keepBoxes: [cargo.box] };
+        $('cargo-kg').value = cargo.kg;
+      }
+    }
     setFlow(setup.flow);
     $('mirror-select').value = setup.mirror || '';
     $('extruded-select').value = setup.extruded || '';
@@ -587,11 +637,13 @@ renderer.domElement.addEventListener('pointerup', (event) => {
 // ---------------------------------------------------------------- running
 
 function updateRunButton() {
-  const ready = state.part && (state.kind === 'flow' ||
-    (state.items.some((i) => i.type === 'support') && state.items.some((i) => i.type === 'load')));
+  const supported = state.items.some((i) => i.type === 'support');
+  const loaded = state.items.some((i) => i.type === 'load');
+  const ready = state.part && (state.kind === 'flow' || (state.kind === 'dual' ? supported : supported && loaded));
   const running = state.job && ['queued', 'running'].includes(state.job.state);
   $('run-button').disabled = !ready || running;
-  $('run-button').title = ready ? '' : (state.part ? 'Place at least one support and one load' : 'Load a part first');
+  const needs = state.kind === 'dual' ? 'Place at least one support' : 'Place at least one support and one load';
+  $('run-button').title = ready ? '' : (state.part ? needs : 'Load a part first');
 }
 
 function runBody() {
@@ -609,6 +661,27 @@ function runBody() {
       supports: of('support').map(itemRegion),
       loads: of('load').map((i) => ({ ...itemRegion(i), force: i.force })),
       keeps: of('keep').map(itemRegion),
+    });
+  } else if (state.kind === 'dual') {
+    const of = (type) => state.items.filter((i) => i.type === type);
+    const box = $('keep-box-toggle').checked ? keepBox() : null;
+    Object.assign(body, {
+      flow: state.flow,
+      resolution: Number($('flow-resolution').value),
+      structureResolution: Number($('load-resolution').value),
+      detail: 2,
+      mirror: $('mirror-select').value || null,
+      flat: [...document.querySelectorAll('.flat-sides input:checked')].map((i) => i.value),
+      speedKmh: Number($('speed-input').value),
+      crosswindKmh: Number($('crosswind-input').value),
+      effort: Number($('effort-select').value),
+      material: $('material-select').value,
+      supports: of('support').map(itemRegion),
+      loads: of('load').map((i) => ({ ...itemRegion(i), force: i.force })),
+      cargo: box ? [{ box, kg: Number($('cargo-kg').value) || 0 }] : [],
+      aeroStations: Number($('stations-input').value),
+      lightenUpTo: Number($('lighten-input').value) / 100,
+      weightStations: Number($('weights-input').value),
     });
   } else {
     const box = $('keep-box-toggle').checked ? keepBox() : null;
@@ -687,6 +760,11 @@ async function showResults(status) {
   state.stale = false;
   state.geometries.forEach((geometry) => geometry.dispose());
   state.geometries.clear();
+  state.shapes.forEach((geometry) => geometry.dispose());
+  state.shapes.clear();
+  $('single-slider').hidden = Boolean(state.result.dual);
+  $('dual-sliders').hidden = !state.result.dual;
+  if (state.result.dual) return showDual();
   const stations = state.result.stations;
   const slider = $('station-slider');
   slider.max = stations.length - 1;
@@ -724,10 +802,15 @@ async function stationGeometry(index) {
 }
 
 async function selectStation(index) {
+  if (state.result.dual) {
+    const s = state.result.stations[index];
+    return selectDesign(s.row, s.column);
+  }
   state.station = index;
   $('station-slider').value = index;
   const station = state.result.stations[index];
   $('station-removed').textContent = pct(station.removed);
+  $('station-sub').textContent = 'removed';
   $('download-button').href = `/api/jobs/${state.job.id}/stations/${index}/stl`;
   renderTiles(station);
   renderCharts();
@@ -744,10 +827,249 @@ async function selectStation(index) {
   updateView();
 }
 
+// ---------------------------------------------------------------- dual map
+
+async function showDual() {
+  const rows = state.result.rows;
+  $('aero-slider').max = rows.length - 1;
+  const notes = rows.filter((r) => r.note).map((r) => `Carved ${pct(r.removed)}: ${r.note}.`);
+  $('sweep-note').hidden = !notes.length;
+  $('sweep-note').textContent = notes.join(' ');
+  $('results').hidden = false;
+  $('results').classList.remove('is-stale');
+  $('stale').hidden = true;
+  const middle = Math.floor((rows.length - 1) / 2);
+  await selectDesign(middle, Math.floor((rowStations(middle).length - 1) / 2));
+  prefetchDual();
+}
+
+function rowStations(row) {
+  return state.result.stations.filter((s) => s.row === row);
+}
+
+async function prefetchDual() {
+  const job = state.job;
+  for (let row = 0; row < state.result.rows.length; row++) {
+    if (state.job !== job) return;
+    await shapeGeometry(row);
+  }
+  for (let i = 0; i < state.result.stations.length; i++) {
+    if (state.job !== job) return;
+    await stationGeometry(i);
+  }
+}
+
+async function shapeGeometry(row) {
+  if (!state.shapes.has(row)) {
+    const payload = await api(`/api/jobs/${state.job.id}/shapes/${row}`);
+    state.shapes.set(row, geometryFrom(payload));
+  }
+  return state.shapes.get(row);
+}
+
+async function selectDesign(row, column) {
+  const rows = state.result.rows;
+  row = Math.max(0, Math.min(rows.length - 1, row));
+  const inRow = rowStations(row);
+  column = Math.max(0, Math.min(inRow.length - 1, column));
+  const index = rows[row].first + column;
+  state.dual = { row, column };
+  state.station = index;
+  const station = state.result.stations[index];
+  $('aero-slider').value = row;
+  $('weight-slider').max = inRow.length - 1;
+  $('weight-slider').value = column;
+  $('aero-out').textContent = `carved ${pct(rows[row].removed)} · drag ${pct(rows[row].drag)}`;
+  $('weight-out').textContent = `${pct(station.removed)} of the rest`;
+  $('station-removed').textContent = `${(station.metrics.mass_g / 1000).toFixed(1)} kg`;
+  $('station-sub').textContent = `· drag ${pct(station.metrics.drag)} · ${n(station.metrics.safety_factor, 1, '×')} safe`;
+  $('download-button').href = `/api/jobs/${state.job.id}/stations/${index}/stl`;
+  renderDualTiles(station);
+  renderMap();
+  renderDualTable();
+  try {
+    const [geometry, shape] = await Promise.all([stationGeometry(index), shapeGeometry(row)]);
+    if (state.station !== index) return;
+    clear(layers.station, false);
+    const useHeat = $('heat-toggle').checked && geometry.getAttribute('color');
+    layers.station.add(new THREE.Mesh(geometry, useHeat ? heatMaterial : partMaterial));
+    clear(layers.shape, false);
+    layers.shape.add(new THREE.Mesh(shape, ghostMaterial));
+  } catch (error) {
+    showError(error.message);
+  }
+  updateView();
+}
+
+const n = (value, digits, unit = '') => (value == null ? '—' : `${value.toFixed(digits)}${unit}`);
+
+function renderDualTiles(station) {
+  const m = station.metrics;
+  const first = state.result.stations[0].metrics;
+  const tiles = [
+    ['Mass', n(m.mass_g / 1000, 1, ' kg'), `${n((m.mass_g - first.mass_g) / 1000, 1, ' kg')} vs original`],
+    ['Drag', pct(m.drag), `${n(m.force_n, 1, ' N')} at ${$('speed-input').value} km/h`],
+    ['Side push', n(m.side_n, 1, ' N'), `in a ${$('crosswind-input').value} km/h crosswind`],
+    ['Safety factor', n(m.safety_factor, 1, '×'), m.safety_factor != null && m.safety_factor < 3 ? 'build one and test it' : ''],
+    ['Max deflection', n(m.deflection_mm, 2, ' mm'), 'worst of both wind cases'],
+  ];
+  $('tiles').replaceChildren(...tiles.map(tileFor));
+}
+
+function tileFor([label, value, delta]) {
+  const tile = document.createElement('div');
+  tile.className = 'tile';
+  const l = document.createElement('div'); l.className = 'tile-label'; l.textContent = label;
+  const v = document.createElement('div'); v.className = 'tile-value'; v.textContent = value;
+  const d = document.createElement('div'); d.className = 'tile-delta'; d.textContent = delta;
+  tile.append(l, v, d);
+  return tile;
+}
+
+// The best trade-offs at the chosen safety: designs no other beats on both
+// drag and mass among those at least that safe.
+function front(points, minSafety) {
+  const safe = points.filter((p) => p.safety != null && p.safety >= minSafety);
+  return safe
+    .filter((p) => !safe.some((q) => q.x <= p.x && q.y <= p.y && (q.x < p.x || q.y < p.y)))
+    .sort((a, b) => a.x - b.x);
+}
+
+function renderMap() {
+  const charts = $('charts');
+  charts.replaceChildren();
+  const wrap = document.createElement('div');
+  wrap.className = 'chart';
+  const heading = document.createElement('p');
+  heading.className = 'chart-title';
+  heading.textContent = 'Every design: mass (kg) against drag (share of the original)';
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.style.height = '200px';
+  const legend = document.createElement('div');
+  legend.className = 'map-legend';
+  wrap.append(heading, svg, legend);
+  charts.append(wrap);
+  const minSafety = Number($('min-safety').value) || 0;
+  const points = state.result.stations.map((s, k) => ({
+    k, row: s.row, column: s.column, x: s.metrics.mass_g / 1000, y: s.metrics.drag, safety: s.metrics.safety_factor,
+  }));
+  const best = front(points, minSafety);
+  const safeties = points.map((p) => p.safety).filter((v) => v != null && v > 0);
+  const low = Math.min(...safeties);
+  const high = Math.max(...safeties);
+  const shade = (s) => rampColor(SEQUENTIAL.slice(2), high > low ? Math.log(s / low) / Math.log(high / low) : 1).getStyle();
+
+  const ramp = document.createElement('span');
+  ramp.className = 'ramp';
+  ramp.style.background = `linear-gradient(to right, ${SEQUENTIAL.slice(2).join(', ')})`;
+  const lowLabel = document.createElement('span'); lowLabel.textContent = `${low.toFixed(1)}×`;
+  const highLabel = document.createElement('span'); highLabel.textContent = `${high.toFixed(1)}× safe`;
+  const hollow = document.createElement('span'); hollow.className = 'hollow-key';
+  const hollowLabel = document.createElement('span'); hollowLabel.textContent = `below ${minSafety}×`;
+  const line = document.createElement('span');
+  line.textContent = `· line: best trade-offs at ${minSafety}× or safer`;
+  legend.append(lowLabel, ramp, highLabel, hollow, hollowLabel, line);
+
+  const draw = () => {
+    svg.replaceChildren();
+    const width = svg.clientWidth || 480;
+    const height = 200;
+    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    const pad = { left: 44, right: 14, top: 10, bottom: 26 };
+    const xMax = niceCeil(Math.max(...points.map((p) => p.x)));
+    const yMax = niceCeil(Math.max(1, ...points.map((p) => p.y)));
+    const x = (v) => pad.left + (v / xMax) * (width - pad.left - pad.right);
+    const y = (v) => height - pad.bottom - (v / yMax) * (height - pad.top - pad.bottom);
+    const add = (tag, attrs, text) => {
+      const node = document.createElementNS(ns, tag);
+      for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+      if (text != null) node.textContent = text;
+      svg.append(node);
+      return node;
+    };
+    for (let i = 0; i <= 4; i++) {
+      const value = (yMax * i) / 4;
+      add('line', { class: i === 0 ? 'baseline' : 'gridline', x1: pad.left, x2: width - pad.right, y1: y(value), y2: y(value) });
+      add('text', { class: 'tick', x: pad.left - 6, y: y(value) + 4, 'text-anchor': 'end' }, pct(value));
+    }
+    for (let i = 0; i <= 4; i++) {
+      const value = (xMax * i) / 4;
+      add('text', { class: 'tick', x: x(value), y: height - 8, 'text-anchor': 'middle' }, `${value.toFixed(value < 10 ? 1 : 0)} kg`);
+    }
+    if (best.length > 1) {
+      add('path', { class: 'front', d: best.map((p, i) => `${i ? 'L' : 'M'}${x(p.x)},${y(p.y)}`).join('') });
+    }
+    for (const p of points) {
+      const ok = p.safety != null && p.safety >= minSafety;
+      const dot = add('circle', { cx: x(p.x), cy: y(p.y), r: 5, class: ok ? 'point' : 'hollow' });
+      if (ok) dot.style.fill = shade(p.safety);
+    }
+    const current = points[state.station];
+    add('circle', { class: 'ring', cx: x(current.x), cy: y(current.y), r: 9 });
+    const hit = add('rect', { class: 'hit', x: 0, y: 0, width, height });
+    const nearest = (event) => {
+      const rect = svg.getBoundingClientRect();
+      const px = ((event.clientX - rect.left) / rect.width) * width;
+      const py = ((event.clientY - rect.top) / rect.height) * height;
+      let pick = points[0];
+      let distance = Infinity;
+      for (const p of points) {
+        const d = Math.hypot(x(p.x) - px, y(p.y) - py);
+        if (d < distance) { distance = d; pick = p; }
+      }
+      return distance < 28 ? pick : null;
+    };
+    hit.addEventListener('pointermove', (event) => {
+      const p = nearest(event);
+      if (!p) return hideTooltip();
+      const row = state.result.rows[p.row];
+      showTooltip(event, `${p.x.toFixed(1)} kg · drag ${pct(p.y)} · ${n(p.safety, 1, '×')} safe`,
+        `carved ${pct(row.removed)}, lightened ${pct(state.result.stations[p.k].removed)}`);
+    });
+    hit.addEventListener('pointerleave', hideTooltip);
+    hit.addEventListener('click', (event) => {
+      const p = nearest(event);
+      if (p) selectDesign(p.row, p.column);
+    });
+  };
+  requestAnimationFrame(draw);
+  wrap.redraw = draw;
+}
+
+function renderDualTable() {
+  const table = $('stations-table');
+  const columns = [
+    { label: 'carved', value: (s) => pct(state.result.rows[s.row].removed) },
+    { label: 'lightened', value: (s) => pct(s.removed) },
+    ...state.result.columns.map((c) => ({ label: c.label, value: (s) => fmt(c.format, s.metrics[c.key]) })),
+    { label: 'side N', value: (s) => n(s.metrics.side_n, 1) },
+  ];
+  const head = document.createElement('tr');
+  for (const c of columns) {
+    const th = document.createElement('th');
+    th.textContent = c.label;
+    head.append(th);
+  }
+  const rows = state.result.stations.map((station, index) => {
+    const tr = document.createElement('tr');
+    tr.className = index === state.station ? 'row current' : 'row';
+    tr.tabIndex = 0;
+    for (const c of columns) {
+      const td = document.createElement('td');
+      td.textContent = c.value(station);
+      tr.append(td);
+    }
+    tr.addEventListener('click', () => selectDesign(station.row, station.column));
+    tr.addEventListener('keydown', (event) => { if (event.key === 'Enter') selectDesign(station.row, station.column); });
+    return tr;
+  });
+  table.replaceChildren(head, ...rows);
+}
+
 function renderTiles(station) {
   const m = station.metrics;
   const first = state.result.stations[0].metrics;
-  const n = (value, digits, unit = '') => (value == null ? '—' : `${value.toFixed(digits)}${unit}`);
   const tiles = state.job.kind === 'load'
     ? [
         ['Mass', n(m.mass_g, 1, ' g'), `${n(m.mass_g - first.mass_g, 1, ' g')} vs original`],
@@ -762,15 +1084,7 @@ function renderTiles(station) {
         ['Cd', n(m.cd, 3), 'on frontal area'],
         ['CdA', n(m.cda_m2, 4, ' m²'), ''],
       ];
-  $('tiles').replaceChildren(...tiles.map(([label, value, delta]) => {
-    const tile = document.createElement('div');
-    tile.className = 'tile';
-    const l = document.createElement('div'); l.className = 'tile-label'; l.textContent = label;
-    const v = document.createElement('div'); v.className = 'tile-value'; v.textContent = value;
-    const d = document.createElement('div'); d.className = 'tile-delta'; d.textContent = delta;
-    tile.append(l, v, d);
-    return tile;
-  }));
+  $('tiles').replaceChildren(...tiles.map(tileFor));
 }
 
 function renderCharts() {
@@ -926,9 +1240,11 @@ function updateView() {
   const showStation = Boolean(state.result) && !state.tool && !$('results').hidden;
   layers.original.visible = Boolean(state.part) && !showStation;
   layers.station.visible = showStation;
-  layers.ghost.visible = showStation && $('ghost-toggle').checked;
-  layers.markers.visible = state.kind === 'load';
-  layers.flow.visible = state.kind === 'flow';
+  const dual = Boolean(state.result?.dual);
+  layers.ghost.visible = showStation && !dual && $('ghost-toggle').checked;
+  layers.shape.visible = showStation && dual && $('ghost-toggle').checked;
+  layers.markers.visible = state.kind !== 'flow';
+  layers.flow.visible = state.kind !== 'load' && !showStation;
   drawLegend();
   updateHint();
 }
@@ -960,6 +1276,7 @@ function showError(message) {
 
 function syncOutputs() {
   $('remove-out').textContent = `${$('remove-input').value}%`;
+  $('lighten-out').textContent = `${$('lighten-input').value}%`;
   for (const kind of ['load', 'flow']) {
     const input = $(`${kind}-resolution`);
     let text = `${input.value} voxels`;
@@ -997,8 +1314,21 @@ $('load-resolution').addEventListener('input', () => {
 $('run-button').addEventListener('click', run);
 $('cancel-button').addEventListener('click', cancel);
 $('station-slider').addEventListener('input', (event) => selectStation(Number(event.target.value)));
+$('aero-slider').addEventListener('input', (event) => {
+  // Keep the same share of lightening as the shape changes.
+  const share = state.dual.column / Math.max(1, rowStations(state.dual.row).length - 1);
+  const row = Number(event.target.value);
+  selectDesign(row, Math.round(share * (rowStations(row).length - 1)));
+});
+$('weight-slider').addEventListener('input', (event) => selectDesign(state.dual.row, Number(event.target.value)));
+$('min-safety').addEventListener('input', () => { if (state.result?.dual) renderMap(); });
+$('lighten-input').addEventListener('input', () => { syncOutputs(); markStale(); });
+$('weights-input').addEventListener('change', markStale);
+$('crosswind-input').addEventListener('change', markStale);
+$('cargo-kg').addEventListener('change', markStale);
 $('heat-toggle').addEventListener('change', () => { if (state.result) selectStation(state.station); });
 $('ghost-toggle').addEventListener('change', updateView);
+$('cut-toggle').addEventListener('change', applyCut);
 $('reset-view').addEventListener('click', () => { if (state.part) frame(); });
 window.addEventListener('resize', () => document.querySelectorAll('.chart').forEach((c) => c.redraw?.()));
 

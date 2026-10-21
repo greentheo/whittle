@@ -79,6 +79,13 @@ class DragReport:
     friction: float
     #: Each face's share of ``drag_area`` -- where to look to see what costs what.
     per_face: FloatArray
+    #: The whole aerodynamic force on each face, ``(faces, 3)``, in the same
+    #: units as ``drag_area`` -- force over dynamic pressure. Its component
+    #: along the flow is ``per_face``; the rest is side force and lift, which
+    #: a structure feels even though the fuel bill does not.
+    forces: FloatArray
+    #: The flow direction this was scored against.
+    flow: FloatArray
 
     def force(
         self, speed: float, *, air_density: float = 1.225, metres_per_unit: float = 1e-3
@@ -86,6 +93,14 @@ class DragReport:
         """Drag in newtons at ``speed`` m/s, for a mesh in millimetres by default."""
         area_m2 = self.drag_area * metres_per_unit**2
         return 0.5 * air_density * speed**2 * area_m2
+
+    def force_vector(
+        self, speed: float, *, air_density: float = 1.225, metres_per_unit: float = 1e-3
+    ) -> FloatArray:
+        """The total aerodynamic force in newtons -- drag, side force and lift together."""
+        q = 0.5 * air_density * speed**2 * metres_per_unit**2
+        total: FloatArray = q * self.forces.sum(axis=0)
+        return total
 
 
 class DragModel:
@@ -203,18 +218,26 @@ class DragModel:
         cp = np.zeros(n_faces, dtype=np.float64)
         cp[exposed] = self.stagnation * (squared - convexity * (1.0 - squared))[exposed]
         cp[leeward] = (base_cp * separated)[leeward]
-        pressure = area * s * cp
 
         # Shoulder suction is real only next to the stagnation pressure that
         # drives it. Never let a forebody pull itself forward on net.
-        fore = np.where(windward, pressure, 0.0)
+        fore = np.where(windward, area * s * cp, 0.0)
         push = float(fore[fore > 0].sum())
         pull = float(-fore[fore < 0].sum())
         if pull > push:
-            pressure = np.where(windward & (pressure < 0), pressure * (push / pull), pressure)
+            cp = np.where(windward & (cp < 0), cp * (push / pull), cp)
+        pressure = area * s * cp
 
         attached = np.where(windward, exposed.astype(np.float64), 1.0 - separated)
-        friction = self.skin_friction * area * np.sqrt(np.clip(1.0 - s**2, 0.0, 1.0)) * attached
+        sliding = np.sqrt(np.clip(1.0 - s**2, 0.0, 1.0))
+        friction = self.skin_friction * area * sliding * attached
+
+        # The full force on each face, not just its drag: pressure pushes along
+        # the inward normal, friction drags along the surface in the direction
+        # the air slides over it. Its component along the flow is ``per_face``.
+        along = self.flow[None, :] - (normal @ self.flow)[:, None] * normal
+        along /= np.where(sliding > 1e-9, sliding, 1.0)[:, None]
+        forces = -(cp * area)[:, None] * normal + friction[:, None] * along
 
         per_face = pressure + friction
         forebody = float(pressure[windward].sum())
@@ -229,6 +252,8 @@ class DragModel:
             base=base,
             friction=rubbing,
             per_face=per_face,
+            forces=forces,
+            flow=self.flow.copy(),
         )
 
     def _aspect(self, mesh: Mesh, s: FloatArray, body: IntArray, n_bodies: int) -> FloatArray:

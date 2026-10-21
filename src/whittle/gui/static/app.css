@@ -213,7 +213,7 @@ legend { padding: 0; margin-bottom: 4px; }
 
 .slider-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .station-title { font-size: 18px; color: var(--ink-2); flex: 1; }
-.station-title span { font-size: 26px; font-weight: 650; color: var(--ink); }
+#station-removed { font-size: 26px; font-weight: 650; color: var(--ink); }
 .slider-actions { display: flex; align-items: center; gap: 14px; }
 .slider-actions .check { margin: 0; }
 #station-slider { margin: 8px 0 2px; height: 24px; }
@@ -265,3 +265,23 @@ table.stations tr.current td { background: var(--surface-2); font-weight: 600; }
   .results { max-height: none; }
   .results-body { grid-template-columns: 1fr; }
 }
+
+/* Dual mode: both set-up panels, plus a few controls of its own. */
+.dual-only { display: none; }
+body.mode-dual .dual-only { display: revert; }
+body.mode-dual .box-fields .dual-only { display: inline-flex; align-items: center; gap: 4px; }
+.box-fields .kg-field input { width: 64px; }
+.dual-sliders { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px 20px; align-items: end; margin-top: 8px; }
+.dual-slider { display: flex; flex-direction: column; gap: 2px; font-size: 13px; color: var(--ink-2); }
+.dual-slider-label { display: flex; justify-content: space-between; gap: 8px; }
+.dual-slider output { color: var(--ink); font-variant-numeric: tabular-nums; }
+.safety-field { margin: 0; gap: 6px; white-space: nowrap; }
+.safety-field input { width: 64px; }
+.chart .hollow { fill: var(--surface); stroke: var(--muted); stroke-width: 1.5; }
+.chart .front { fill: none; stroke: var(--ink-2); stroke-width: 1; }
+.chart .ring { fill: none; stroke: var(--ink); stroke-width: 2; }
+.map-legend { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-2); margin-top: 4px; flex-wrap: wrap; }
+.map-legend .ramp { width: 90px; height: 8px; border-radius: 3px; }
+.map-legend .hollow-key { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--muted); display: inline-block; }
+@media (max-width: 860px) { .dual-sliders { grid-template-columns: 1fr; } }
+body.mode-dual .field-row.dual-only { display: flex; }

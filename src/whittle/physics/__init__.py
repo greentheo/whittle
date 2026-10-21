@@ -7,13 +7,14 @@ building the part and testing it.
 """
 
 from .drag import DragModel, DragReport
-from .fea import MATERIALS, FEAResult, Load, Material, Support, VoxelFEA, material
+from .fea import MATERIALS, FEAResult, FieldLoad, Load, Material, Support, VoxelFEA, material
 
 __all__ = [
     "MATERIALS",
     "DragModel",
     "DragReport",
     "FEAResult",
+    "FieldLoad",
     "Load",
     "Material",
     "Support",

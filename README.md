@@ -43,9 +43,14 @@ the four examples -- and then:
 - **Airflow:** pick which way the air moves, and optionally keep the part
   symmetric, keep faces flat, protect a box inside it, or mark it as a slice
   of something long.
+- **Both:** the airflow set-up plus where the part is held, a cargo space
+  and its weight, and a crosswind. You get two sliders -- shape for the wind,
+  and lighten -- and a map of every design, mass against drag, coloured by
+  safety, with the best trade-offs at the safety you ask for marked.
 - **Run**, then **slide**. Each station shows its mesh with a heatmap --
   stress for strength, drag per area for airflow -- its numbers, and where it
-  sits on the trade-off curve. Download any station as an STL.
+  sits on the trade-off curve. "Cut in half" slices the part to show what
+  lightening did inside a skin. Download any station as an STL.
 
 The page loads three.js from a CDN, so the browser needs to be online. The
 server needs nothing beyond the three dependencies, binds to localhost only,
@@ -101,6 +106,60 @@ representation that can open a hole -- no smooth deformation of a solid block
 will ever find a truss. Shaping against a flow wants the opposite: a surface
 that stays closed and smooth, because drag is decided by its curvature.
 
+## Both at once
+
+A part that sits in the wind and carries a load -- a roof pod on its bars, a
+fairing, a light-bar bracket -- wants both: slipperier *and* lighter, without
+breaking. `DualStudy` does it without the obvious `n x m` grid of runs, because
+the two couple in one direction only. Carving changes the outside; lightening,
+as long as it keeps the outer skin, never does. So the study nests them:
+
+1. carve the outside to a few drag budgets, coarse first,
+2. lighten inside each carved shape, keeping its skin, under your loads plus
+   *that shape's own* wind -- once head-on, once in a crosswind,
+3. fill in more shapes wherever neighbouring ones differ most.
+
+Each lightening run yields its whole column of designs at once, so a map of
+five shapes by five weights is five carves and five lightening runs: about
+two minutes for the 2 m foam pod in `examples/05_dual_roof_box.py`.
+
+```python
+from whittle import DualStudy, io
+
+pod = DualStudy(io.load("pod.stl"), flow=(-1, 0, 0), material="xps", mirror="y", flat=("-z",))
+pod.support(box=((350, -460, -10), (450, 460, 40)))     # front roof bar
+pod.support(box=((-450, -460, -10), (-350, 460, 40)))   # rear roof bar
+pod.cargo(((-750, -350, 60), (750, 350, 320)), kg=50)   # stays empty, 50 kg on its floor
+sweep = pod.sweep()
+for i, j in sweep.front(min_safety=20):
+    print(sweep.rows[i].stations[j].metrics)
+```
+
+What it found is worth knowing: for that pod, drag and weight do not fight --
+carving the nose removes foam too, so slipperier and lighter go together. The
+real trade-off is against strength, so how conservative to be is the choice
+that moves the answer:
+
+| at least | best design | mass | drag | safety |
+|---|---|---|---|---|
+| 5x safe | carved 25%, lightened 22% | 7.5 kg | 22% | 8x |
+| 20x safe | carved 18%, lightened 33% | 8.4 kg | 30% | 32x |
+| 40x safe | carved 13%, lightened 30% -- or 18% / 15% | 9.8 / 10.7 kg | 54% / 30% | 42x / 44x |
+
+At 40x a genuine choice appears between a lighter pod and a slipperier one.
+The safety factors are high because the foam carries only 50 kg and the wind;
+they are bare foam, with no glass or carbon skin, so they are conservative.
+
+The crosswind uses the crossflow principle: the drag at driving speed along
+the direction of travel, plus the broadside drag at crosswind speed across it.
+Both are head-on cases, which is where the drag model is calibrated -- its own
+answers for a yawed flow are not to be trusted.
+
+**One limit to know.** Voxels are about 1/48 of the part, so walls come out
+at least that thick: 40 mm on a 2 m pod. That is a real foam wall, which is
+why the example is foam. It is not a 4 mm moulded shell, and for one of those
+this would tell you where ribs and mounts belong, not what it weighs.
+
 ## How far to trust it
 
 **Structure -- validated.** Eight-node hexahedra, one per voxel, solved by
@@ -138,8 +197,9 @@ sheltered. Calibrated against high-Reynolds-number textbook values:
 Trust its rankings -- rounded nose over square, gentle taper over steep, the
 order of the designs in a sweep. Treat its absolute numbers as good to perhaps
 30%, and optimistic for anything sitting in a car's own disturbed airflow,
-which it does not see. It also cannot see crosswind, vortex shedding, lift, or
-gaps between bodies. When those matter, take the two or three designs it
+which it does not see. It cannot see vortex shedding, lift, or gaps between
+bodies, and its answers for air arriving at an angle are not to be trusted --
+which is why crosswind loads are built from two head-on cases instead. When those matter, take the two or three designs it
 picked to a real CFD run; that is what it is for.
 
 ## Why evolutionary
@@ -162,9 +222,13 @@ can replace scipy's engine without touching anything else.
 
 ## Status
 
-**Works, tested (124 tests, ~19 s), runs today**
+**Works, tested (136 tests, ~25 s), runs today**
 
-- The web GUI -- load, click to place, run, slide, download
+- The web GUI -- load, click to place, run, slide, download; strength,
+  airflow, or both
+- `DualStudy`, `DualSweep` -- carve for drag and lighten for load together,
+  with wind loads from each shape and adaptive refinement
+- Load cases and distributed loads in the FEA (`Load(case=...)`, `FieldLoad`)
 - `LoadStudy`, `FlowStudy`, `Sweep` -- the part-in, slider-out workflow
 - `VoxelFEA` -- linear-elastic hex FEA, matrix-free CG, stress and safety
   factor, floating material dropped, broken load paths reported
@@ -210,6 +274,7 @@ Times measured on one core of an M4 laptop. Everything is written to `out/`.
 | `02_shelf_bracket.py` | `LoadStudy`: a solid bracket whittled to a truss, table above | 31 s |
 | `03_roof_box.py` | `FlowStudy`: a square 2 m roof box carved around a protected cargo block | 84 s |
 | `04_roof_bar.py` | `FlowStudy(extruded=...)`: a rectangular rack bar reshaped, as a 2D section | 35 s |
+| `05_dual_roof_box.py` | `DualStudy`: a 2 m foam pod on two bars with 50 kg of cargo, carved and lightened together | 127 s |
 
 The roof box, for a taste of the flow side:
 
