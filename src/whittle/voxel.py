@@ -118,6 +118,48 @@ class Grid:
         result: BoolArray = distance <= nearest + 0.75 * self.spacing
         return result
 
+    def patch(
+        self,
+        point: Vector3,
+        normal: Vector3,
+        within: BoolArray,
+        *,
+        depth: float | None = None,
+        radius: float | None = None,
+    ) -> BoolArray:
+        """The face under a click: material just beneath the surface at ``point``.
+
+        ``normal`` is the outward surface normal there, as a raycast returns
+        it. Selects the voxels of ``within`` whose centres lie no more than
+        ``depth`` beneath the plane through ``point`` -- two voxels by default
+        -- and, of those, only the connected patch the click landed on. On a
+        flat face that is the whole face; on a curved one, the part of it
+        that lies within ``depth`` of flat. ``radius`` caps the patch's size.
+        """
+        n = np.asarray(normal, dtype=np.float64)
+        length = float(np.linalg.norm(n))
+        if length == 0:
+            raise ValueError("normal must be non-zero")
+        n /= length
+        depth = 2.0 * self.spacing if depth is None else float(depth)
+        offset = self.centers() - np.asarray(point, dtype=np.float64)
+        below = -(offset @ n)
+        # Voxel centres sit about half a voxel inside a surface meshed from
+        # them, so the first layer is at half a voxel deep and the second at
+        # one and a half. The margin above the plane absorbs a click that
+        # lands a little proud of the voxels.
+        slab = within & (below >= -0.5 * self.spacing) & (below <= depth)
+        if radius is not None:
+            slab &= np.linalg.norm(offset, axis=-1) <= radius
+        seed = self.near(point, within, radius=0.0)
+        labels, _ = ndimage.label(slab)
+        touched = np.unique(labels[seed & slab])
+        touched = touched[touched > 0]
+        if not len(touched):
+            return seed
+        result: BoolArray = np.isin(labels, touched)
+        return result
+
     def voxelize(self, mesh: Mesh) -> BoolArray:
         """Solid occupancy of a closed mesh: which voxel centres are inside it.
 

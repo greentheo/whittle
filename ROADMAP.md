@@ -12,6 +12,12 @@ In build order.
 - **The slider.** `LoadStudy.sweep()` and `FlowStudy.sweep()` return a
   `Sweep`: stations from the original part to the most aggressive design, each
   evolved from the last. This is the part-in, slider-out workflow a GUI wraps.
+- **The web GUI.** `python -m whittle.gui`: load a part, click to place
+  supports and loads (a whole face or a ball around a point, with the
+  selected voxels drawn), or pick the flow and its constraints; run with
+  progress and cancel; slide through the stations with stress or drag
+  heatmaps, trade-off charts, and STL download. Standard library server,
+  three.js page.
 - **A fast approximate drag model** (the "panel method" route of old item 4,
   done as an engineering model rather than a potential-flow solve, because
   potential flow predicts zero drag). Calibrated to textbook high-Reynolds
@@ -30,27 +36,7 @@ against 578 from zero -- because removing even 2% of the voxels leaves a
 residual as large as the load itself. An incomplete-LU preconditioner was also
 tried; CG diverges under it, since ILU of this system is not positive definite.
 
-## 1. Web GUI around the slider
-
-The next thing, and the reason the API looks the way it does.
-
-- Load an STL; show it in a three.js view.
-- **Load study:** click the surface to place a load (a point, plus a force
-  vector) or a support (a point or a dragged box). Those map one-to-one onto
-  `study.load(force, at=...)` and `study.support(box=...)`.
-- **Flow study:** an arrow for the flow direction, toggles for mirror and flat
-  sides, a box for the protected volume.
-- Run, with progress from the existing `callback` hooks, then **the slider**:
-  `sweep.slide(t)` for the mesh, the station's metrics beside it.
-- Heatmaps the data already supports: per-voxel stress (`FEAResult.von_mises`)
-  and per-face drag (`DragReport.per_face`) -- where the part is working,
-  where the drag comes from.
-- Export the chosen station as STL.
-
-A small Python server (FastAPI or similar) around `LoadStudy`/`FlowStudy` is
-enough; studies are seconds to a minute, so a job queue is not needed yet.
-
-## 2. Multigrid preconditioning
+## 1. Multigrid preconditioning
 
 The structural solve's real cost. Jacobi-preconditioned CG needs 300-1000
 iterations on a slender part, so a sweep is about 30 s at 48 voxels along the
@@ -59,7 +45,7 @@ multigrid on the voxel grid -- coarsen by two per level, Galerkin coarse
 operators, a smoother on each -- is the standard fix in topology optimization
 and should make iteration counts nearly independent of resolution.
 
-## 3. A real flow check
+## 2. A real flow check
 
 The drag model ranks shapes; something should check its rankings.
 
@@ -67,12 +53,12 @@ The drag model ranks shapes; something should check its rankings.
    between. Trustworthy, and slow enough that it belongs outside the loop.
 2. **A lattice-Boltzmann visual wind tunnel** in numpy, at low resolution:
    too low a Reynolds number to trust its drag at highway speed, but enough to
-   show where the flow separates and what the wake looks like -- which is what
-   a GUI view wants.
+   show where the flow separates and what the wake looks like -- a view the
+   GUI could draw beside the drag heatmap.
 
 Either is also the way to recalibrate the drag model if the rankings disagree.
 
-## 4. Pareto search instead of a weighted sum
+## 3. Pareto search instead of a weighted sum
 
 A sweep is already a hand-built trade-off curve: removal on one axis,
 stiffness or drag on the other. A proper multi-objective method (NSGA-II)
@@ -80,7 +66,7 @@ would find the front in one run, and could add a third axis -- printability,
 say -- that the sweep cannot. This is where EML's multi-objective work is
 most directly reusable.
 
-## 5. Manufacturing constraints as first-class objectives
+## 4. Manufacturing constraints as first-class objectives
 
 The real reason to keep a population method around.
 
@@ -89,18 +75,18 @@ The real reason to keep a population method around.
 - Tool reach for subtractive manufacturing
 - Snapping internal structure to a catalogue of lattice cells
 
-## 6. Parallel evaluation
+## 5. Parallel evaluation
 
 A flow station runs ten thousand independent drag evaluations; scipy's
 `workers=` passes straight through `evolve()` and has not been profiled. BESO
-is sequential by nature, so the structural side waits on item 2 instead.
+is sequential by nature, so the structural side waits on item 1 instead.
 
 ## Open questions
 
 - **How far to trust the drag model on a car roof.** It scores bodies in free
   air. A roof box sits in the car's boundary layer and the flow off the
   windscreen. The rankings probably survive; the absolute savings certainly
-  shrink. Item 3 is how to find out by how much.
+  shrink. Item 2 is how to find out by how much.
 - **Control-lattice detail for flow.** Two divisions per axis can round a
   nose, slope it and taper a tail, and cannot make the wiggles that would game
   the model. Three might find better shapes, or might find exploits.

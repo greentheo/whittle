@@ -12,6 +12,8 @@ shape:
 
 Every method that places something takes either ``at=`` (a point, as a click
 on the surface would give) or ``box=`` (two corners), in model coordinates.
+Give ``normal=`` with ``at=`` -- the surface normal a click also gives -- to
+select the whole face under the point rather than a ball around it.
 """
 
 from __future__ import annotations
@@ -88,9 +90,15 @@ class LoadStudy:
         self.protected = np.zeros(grid.shape, dtype=bool)
 
     def region(
-        self, *, at: Vector3 | None = None, box: Box | None = None, radius: float | None = None
+        self,
+        *,
+        at: Vector3 | None = None,
+        box: Box | None = None,
+        radius: float | None = None,
+        normal: Vector3 | None = None,
+        depth: float | None = None,
     ) -> BoolArray:
-        """The part's voxels at a point or in a box."""
+        """The part's voxels at a point, on the face under a point, or in a box."""
         if (at is None) == (box is None):
             raise ValueError("give exactly one of at= or box=")
         if box is not None:
@@ -99,6 +107,8 @@ class LoadStudy:
                 raise ValueError(f"box {box} contains none of the part")
             return mask
         assert at is not None
+        if normal is not None:
+            return self.grid.patch(at, normal, self.solid, depth=depth, radius=radius)
         return self.grid.near(at, self.solid, radius=radius)
 
     def support(
@@ -107,10 +117,13 @@ class LoadStudy:
         at: Vector3 | None = None,
         box: Box | None = None,
         radius: float | None = None,
+        normal: Vector3 | None = None,
+        depth: float | None = None,
         axes: tuple[bool, bool, bool] = (True, True, True),
     ) -> LoadStudy:
         """Hold part of the part in place: a bolt, a clamp, a face glued down."""
-        self.supports.append(Support(self.region(at=at, box=box, radius=radius), axes))
+        region = self.region(at=at, box=box, radius=radius, normal=normal, depth=depth)
+        self.supports.append(Support(region, axes))
         return self
 
     def load(
@@ -120,16 +133,25 @@ class LoadStudy:
         at: Vector3 | None = None,
         box: Box | None = None,
         radius: float | None = None,
+        normal: Vector3 | None = None,
+        depth: float | None = None,
     ) -> LoadStudy:
         """Push on the part. ``force`` is the total, in newtons (1 kg is about 9.8 N)."""
-        self.loads.append(Load(self.region(at=at, box=box, radius=radius), force))
+        region = self.region(at=at, box=box, radius=radius, normal=normal, depth=depth)
+        self.loads.append(Load(region, force))
         return self
 
     def keep(
-        self, *, at: Vector3 | None = None, box: Box | None = None, radius: float | None = None
+        self,
+        *,
+        at: Vector3 | None = None,
+        box: Box | None = None,
+        radius: float | None = None,
+        normal: Vector3 | None = None,
+        depth: float | None = None,
     ) -> LoadStudy:
         """Material that must survive whatever the physics thinks: a bolt boss, a mating face."""
-        self.protected |= self.region(at=at, box=box, radius=radius)
+        self.protected |= self.region(at=at, box=box, radius=radius, normal=normal, depth=depth)
         return self
 
     def solver(self) -> VoxelFEA:
@@ -157,11 +179,15 @@ class LoadStudy:
         smooth: float = 0.6,
         relax: int = 8,
         callback: Callable[[int, float, float], None] | None = None,
+        progress: Callable[[float], None] | None = None,
     ) -> Sweep:
         """Whittle the part down in steps, recording a design at each.
 
         ``stations`` is either a count, spread evenly from nothing removed to
         ``remove_up_to``, or an explicit list of removal fractions.
+
+        ``progress`` is called with the fraction of the run done, for a
+        progress bar; raising from it abandons the run.
 
         ``smooth`` and ``relax`` only shape the exported meshes, not what was
         analyzed: see :meth:`~whittle.voxel.Grid.mesh`. The defaults move the
@@ -175,6 +201,14 @@ class LoadStudy:
         else:
             removals = [0.0, *stations]
         fea = self.solver()
+        furthest = max(removals) or 1.0
+
+        def report(solves: int, removed: float, compliance: float) -> None:
+            if callback is not None:
+                callback(solves, removed, compliance)
+            if progress is not None:
+                progress(min(1.0, removed / furthest))
+
         run = beso(
             fea,
             self.solid,
@@ -182,7 +216,7 @@ class LoadStudy:
             keep=self.protected,
             evolution_rate=evolution_rate,
             filter_radius=filter_radius,
-            callback=callback,
+            callback=report,
         )
         baseline = run.stations[0].result.compliance
         voxel_cm3 = self.grid.voxel_volume / 1000.0
@@ -198,7 +232,11 @@ class LoadStudy:
             }
             result_stations.append(
                 Station(
-                    s.removed, metrics, _mesher(self.grid, s.solid, smooth, relax), design=s.solid
+                    s.removed,
+                    metrics,
+                    _mesher(self.grid, s.solid, smooth, relax),
+                    design=s.solid,
+                    analysis=result,
                 )
             )
         return Sweep(
@@ -331,11 +369,14 @@ class FlowStudy:
         effort: float = 1.0,
         seed: int | None = 0,
         callback: Callable[[int, float, float], None] | None = None,
+        progress: Callable[[float], None] | None = None,
     ) -> Sweep:
         """Carve the part to each removal budget in turn, each from the last.
 
         ``effort`` scales the search budget per station. ``callback(station,
-        removed, drag)`` is called as each station is finished.
+        removed, drag)`` is called as each station is finished; ``progress``
+        with the fraction of the whole run done, every generation. Raising
+        from either abandons the run.
         """
         if isinstance(stations, int):
             if stations < 2:
@@ -357,16 +398,24 @@ class FlowStudy:
         genome = np.zeros(lattice.n_params)
         designs = [(0.0, genome, self.base)]
         best = 1.0
+        generations = max(5, int(round(30 * effort)))
         for number, budget in enumerate(budgets, start=1):
             objective = WeightedSum({drag: 1.0, VolumeBudget(volume, budget): 20.0, **constraints})
+
+            def step(generation: int, _: float, done: int = number - 1) -> None:
+                if progress is not None:
+                    fraction = (done + min(generation, generations) / generations) / len(budgets)
+                    progress(fraction)
+
             result = evolve(
                 lattice,
                 objective,
                 seed=seed,
-                maxiter=max(5, int(round(30 * effort))),
+                maxiter=generations,
                 popsize=6,
                 x0=genome,
                 spread=0.15 if number == 1 else 0.08,
+                callback=step,
             )
             # Every penalty is normalized -- a fraction of the volume, of a voxel,
             # of the faces, of a keep box -- so a thousandth of one is invisible.
@@ -392,7 +441,13 @@ class FlowStudy:
                 "frontal_m2": report.frontal_area * 1e-6,
             }
             result_stations.append(
-                Station(1.0 - mesh.volume / volume, metrics, _constant(mesh), design=design)
+                Station(
+                    1.0 - mesh.volume / volume,
+                    metrics,
+                    _constant(mesh),
+                    design=design,
+                    analysis=report,
+                )
             )
         return Sweep(
             "flow",

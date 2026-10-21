@@ -101,7 +101,11 @@ def test_beso_reports_when_it_cannot_go_further() -> None:
     study = _shelf_bracket()
     # Ask for more than a bracket can lose while still joining the tip to the wall.
     run = beso(study.solver(), study.solid, removals=[0.0, 0.99], evolution_rate=0.1)
-    assert "disconnects" in run.note or run.stations[-1].removed < 0.99
+    assert "disconnects" in run.note
+    # The furthest design that still holds is kept as the end of the slider.
+    assert len(run.stations) == 2
+    assert 0.5 < run.stations[-1].removed < 0.99
+    assert run.stations[-1].result.supported
 
 
 def test_beso_rejects_bad_removals() -> None:

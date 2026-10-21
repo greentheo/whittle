@@ -160,10 +160,11 @@ def beso(
                     f"stopped at {1 - n / n_domain:.0%} removed: going further "
                     "disconnects a load from every support"
                 )
+                # The furthest design that still holds together is the end
+                # of the slider: settle it and record it, then stop.
+                count = n
                 break
             solid, current = candidate, result
-        if note:
-            break
         # Settle at constant volume, keeping the stiffest design seen.
         best_solid, best = solid, current
         recent = [current.compliance]
@@ -182,6 +183,8 @@ def beso(
                 break
         solid, current = best_solid, best
         stations.append(BesoStation(1.0 - int(solid.sum()) / n_domain, solid.copy(), current))
+        if note:
+            break
     return BesoRun(stations, note, solves)
 
 

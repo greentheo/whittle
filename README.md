@@ -25,6 +25,32 @@ sweep = study.sweep(remove_up_to=0.25)
 io.save(sweep.slide(0.5).mesh, "roof_box-halfway.stl")
 ```
 
+## The GUI
+
+```bash
+python -m whittle.gui
+```
+
+That opens a page in your browser, served from your own machine (`whittle-gui`
+does the same once the package is installed). Load an STL or OBJ -- or one of
+the four examples -- and then:
+
+- **Strength:** click the part to place a *support* (where it is screwed or
+  clamped) and a *load* (kilograms or newtons, down or into the surface).
+  "Whole face" takes the face you clicked; "around point" a ball of the
+  radius you set. Every placement shows the voxels it actually selected, so
+  what the solver will hold or push is never a guess.
+- **Airflow:** pick which way the air moves, and optionally keep the part
+  symmetric, keep faces flat, protect a box inside it, or mark it as a slice
+  of something long.
+- **Run**, then **slide**. Each station shows its mesh with a heatmap --
+  stress for strength, drag per area for airflow -- its numbers, and where it
+  sits on the trade-off curve. Download any station as an STL.
+
+The page loads three.js from a CDN, so the browser needs to be online. The
+server needs nothing beyond the three dependencies, binds to localhost only,
+and keeps everything in memory.
+
 ## Why a slider and not an answer
 
 Neither physics model here is accurate enough to pick *the* answer, and no
@@ -56,8 +82,8 @@ strut under compression and a tie along the top in tension -- found by the
 solver, not drawn by anyone.
 
 Each station evolves from the one before it, so sliding along a sweep reads as
-one part being whittled down, not as unrelated designs. That is the property a
-GUI slider needs, and it is what the web interface on the roadmap is for.
+one part being whittled down, not as unrelated designs, which is what makes
+the GUI's slider worth dragging.
 
 ## The two studies
 
@@ -136,16 +162,17 @@ can replace scipy's engine without touching anything else.
 
 ## Status
 
-**Works, tested (110 tests, ~14 s), runs today**
+**Works, tested (124 tests, ~19 s), runs today**
 
+- The web GUI -- load, click to place, run, slide, download
 - `LoadStudy`, `FlowStudy`, `Sweep` -- the part-in, slider-out workflow
 - `VoxelFEA` -- linear-elastic hex FEA, matrix-free CG, stress and safety
   factor, floating material dropped, broken load paths reported
 - `beso` -- bi-directional evolutionary structural optimization with stations
 - `DragModel` -- the drag estimate above, with a per-face breakdown of where
   the drag comes from
-- `Grid` -- voxelizing any closed STL, selecting regions by point or box,
-  meshing results with smoothing that keeps volume
+- `Grid` -- voxelizing any closed STL, selecting regions by point, face or
+  box, meshing results with smoothing that keeps volume
 - `Compliance` -- the FEA as an objective for population search, replacing
   the geometric proxy `AnchorConnectivity` (which stays, as a cheap pre-filter)
 - `FFDLattice` -- now with frozen control points, mirror symmetry, inward-only
@@ -154,8 +181,6 @@ can replace scipy's engine without touching anything else.
 
 **Not yet**
 
-- A GUI. The API is shaped for one -- a point to `at=`, a box to `box=`, a
-  sweep to a slider -- and it is next on the roadmap.
 - Speed on fine grids. Jacobi-preconditioned CG needs hundreds of iterations
   on a slender part; a structural sweep is about 30 s at the default
   resolution (48 voxels along the longest side) and 86 s at 60. Multigrid is
@@ -208,9 +233,8 @@ ordering and the knee of the curve are the parts to act on.
 
 ## Where this is going
 
-`ROADMAP.md`. The short version: a web GUI around the slider is next, then
-multigrid to make finer grids fast, then a real flow solve to check the drag
-model's picks against.
+`ROADMAP.md`. The short version: multigrid to make finer grids fast, then a
+real flow solve to check the drag model's picks against.
 
 ---
 

@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>whittle</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M4 26 L16 4 L28 26 Z' fill='none' stroke='%232a78d6' stroke-width='3' stroke-linejoin='round'/%3E%3Cpath d='M10 26 L16 15 L22 26' fill='none' stroke='%232a78d6' stroke-width='3' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/app.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">whittle</div>
+      <div class="part-title" id="part-title">No part loaded</div>
+      <div class="topbar-status" id="topbar-status" role="status" aria-live="polite"></div>
+    </header>
+
+    <aside class="sidebar" aria-label="Set-up">
+      <section class="panel">
+        <h2>Part</h2>
+        <label class="field">
+          <span>Example</span>
+          <select id="example-select">
+            <option value="">Try an example…</option>
+          </select>
+        </label>
+        <div class="field-row">
+          <label class="button file-button">
+            Open STL or OBJ
+            <input type="file" id="file-input" accept=".stl,.obj" hidden>
+          </label>
+          <label class="field compact">
+            <span class="visually-hidden">Units</span>
+            <select id="units-select" aria-label="Units of the file">
+              <option value="mm">mm</option>
+              <option value="cm">cm</option>
+              <option value="m">m</option>
+              <option value="in">inches</option>
+            </select>
+          </label>
+        </div>
+        <p class="hint" id="part-info">Or drop a file on the view.</p>
+      </section>
+
+      <section class="panel">
+        <h2>Study</h2>
+        <div class="segmented" role="tablist" aria-label="Study type">
+          <button role="tab" id="tab-load" aria-selected="true" data-kind="load">Strength</button>
+          <button role="tab" id="tab-flow" aria-selected="false" data-kind="flow">Airflow</button>
+        </div>
+
+        <div id="load-panel" class="kind-panel">
+          <p class="hint">Click the part to place where it is held and what pushes on it.</p>
+          <div class="tools" role="group" aria-label="Place">
+            <button class="tool" data-tool="support" aria-pressed="false"><i class="dot support"></i>Support</button>
+            <button class="tool" data-tool="load" aria-pressed="false"><i class="dot load"></i>Load</button>
+            <button class="tool" data-tool="keep" aria-pressed="false"><i class="dot keep"></i>Keep</button>
+          </div>
+          <div class="field-row">
+            <div class="segmented small" role="radiogroup" aria-label="What a click selects">
+              <button role="radio" aria-checked="true" data-select="face">Whole face</button>
+              <button role="radio" aria-checked="false" data-select="point">Around point</button>
+            </div>
+            <label class="field compact" id="radius-field">
+              <span>radius mm</span>
+              <input type="number" id="radius-input" min="0.5" step="0.5" value="5">
+            </label>
+          </div>
+          <div id="load-options" class="load-options">
+            <div class="field-row">
+              <label class="field compact">
+                <span>Load</span>
+                <input type="number" id="force-input" min="0" step="0.5" value="10">
+              </label>
+              <label class="field compact">
+                <span class="visually-hidden">Unit</span>
+                <select id="force-unit" aria-label="Load unit">
+                  <option value="kg">kg</option>
+                  <option value="N">N</option>
+                </select>
+              </label>
+              <label class="field grow">
+                <span>Direction</span>
+                <select id="force-direction">
+                  <option value="down">Down (gravity, −Z)</option>
+                  <option value="into">Into the surface</option>
+                  <option value="custom">Custom…</option>
+                </select>
+              </label>
+            </div>
+            <div class="field-row" id="custom-direction" hidden>
+              <label class="field compact"><span>x</span><input type="number" id="dir-x" value="0" step="0.1"></label>
+              <label class="field compact"><span>y</span><input type="number" id="dir-y" value="0" step="0.1"></label>
+              <label class="field compact"><span>z</span><input type="number" id="dir-z" value="-1" step="0.1"></label>
+            </div>
+          </div>
+          <ul class="placed" id="placed-list" aria-label="Placed supports and loads"></ul>
+          <label class="field">
+            <span>Material</span>
+            <select id="material-select"></select>
+          </label>
+          <label class="field">
+            <span>Detail <output id="load-resolution-out"></output></span>
+            <input type="range" id="load-resolution" min="24" max="80" step="4" value="48">
+          </label>
+        </div>
+
+        <div id="flow-panel" class="kind-panel" hidden>
+          <p class="hint">Pick which way the air moves past the part, as in a wind tunnel.</p>
+          <div class="field">
+            <span>Air moves toward</span>
+            <div class="direction-grid" role="radiogroup" aria-label="Flow direction">
+              <button role="radio" data-flow="-1,0,0" aria-checked="true">−X</button>
+              <button role="radio" data-flow="1,0,0" aria-checked="false">+X</button>
+              <button role="radio" data-flow="0,-1,0" aria-checked="false">−Y</button>
+              <button role="radio" data-flow="0,1,0" aria-checked="false">+Y</button>
+              <button role="radio" data-flow="0,0,-1" aria-checked="false">−Z</button>
+              <button role="radio" data-flow="0,0,1" aria-checked="false">+Z</button>
+            </div>
+          </div>
+          <div class="field-row">
+            <label class="field grow">
+              <span>Keep symmetric</span>
+              <select id="mirror-select">
+                <option value="">No</option>
+                <option value="x">Across X</option>
+                <option value="y">Across Y</option>
+                <option value="z">Across Z</option>
+              </select>
+            </label>
+            <label class="field grow">
+              <span>Long part along</span>
+              <select id="extruded-select">
+                <option value="">Not long</option>
+                <option value="x">X</option>
+                <option value="y">Y</option>
+                <option value="z">Z</option>
+              </select>
+            </label>
+          </div>
+          <fieldset class="field flat-sides">
+            <legend>Keep flat</legend>
+            <label><input type="checkbox" value="-z"> bottom −Z</label>
+            <label><input type="checkbox" value="+z"> top +Z</label>
+            <label><input type="checkbox" value="-x"> −X</label>
+            <label><input type="checkbox" value="+x"> +X</label>
+            <label><input type="checkbox" value="-y"> −Y</label>
+            <label><input type="checkbox" value="+y"> +Y</label>
+          </fieldset>
+          <label class="check">
+            <input type="checkbox" id="keep-box-toggle"> Protect a box inside (cargo, mattress…)
+          </label>
+          <div id="keep-box-fields" class="box-fields" hidden>
+            <span>from</span>
+            <input type="number" id="kb-x0" aria-label="Box minimum x"><input type="number" id="kb-y0" aria-label="Box minimum y"><input type="number" id="kb-z0" aria-label="Box minimum z">
+            <span>to</span>
+            <input type="number" id="kb-x1" aria-label="Box maximum x"><input type="number" id="kb-y1" aria-label="Box maximum y"><input type="number" id="kb-z1" aria-label="Box maximum z">
+          </div>
+          <div class="field-row">
+            <label class="field grow">
+              <span>Speed km/h</span>
+              <input type="number" id="speed-input" min="1" step="5" value="100">
+            </label>
+            <label class="field grow">
+              <span>Search</span>
+              <select id="effort-select">
+                <option value="0.5">Quick</option>
+                <option value="1" selected>Normal</option>
+                <option value="2">Thorough</option>
+              </select>
+            </label>
+          </div>
+          <label class="field">
+            <span>Detail <output id="flow-resolution-out"></output></span>
+            <input type="range" id="flow-resolution" min="20" max="72" step="4" value="40">
+          </label>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Sweep</h2>
+        <label class="field">
+          <span>Remove up to <output id="remove-out">60%</output></span>
+          <input type="range" id="remove-input" min="5" max="90" step="5" value="60">
+        </label>
+        <label class="field compact-inline">
+          <span>Stations</span>
+          <input type="number" id="stations-input" min="2" max="16" value="7">
+        </label>
+        <div class="run-row">
+          <button class="button primary" id="run-button" disabled>Run sweep</button>
+          <button class="button" id="cancel-button" hidden>Cancel</button>
+        </div>
+        <div class="progress" id="progress" hidden>
+          <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+          <span class="progress-text" id="progress-text"></span>
+        </div>
+        <p class="error" id="error" role="alert" hidden></p>
+      </section>
+    </aside>
+
+    <main class="stage">
+      <div class="viewport" id="viewport">
+        <div class="empty" id="empty">
+          <p class="empty-title">Bring a part</p>
+          <p>Pick an example, open an STL, or drop one here.</p>
+        </div>
+        <div class="hud hud-top" id="hud-hint"></div>
+        <div class="hud hud-legend" id="legend" hidden>
+          <div class="legend-title" id="legend-title"></div>
+          <div class="legend-bar" id="legend-bar"></div>
+          <div class="legend-scale"><span id="legend-min"></span><span id="legend-mid"></span><span id="legend-max"></span></div>
+        </div>
+        <div class="hud hud-tools">
+          <button class="icon-button" id="reset-view" title="Reset view" aria-label="Reset view">⟲</button>
+        </div>
+        <div class="drop-veil" id="drop-veil" hidden>Drop to load</div>
+      </div>
+
+      <section class="results" id="results" hidden aria-label="Results">
+        <div class="stale" id="stale" hidden>The set-up changed since this sweep ran. Run it again to update.</div>
+        <div class="slider-block">
+          <div class="slider-head">
+            <div class="station-title"><span id="station-removed">0%</span> removed</div>
+            <div class="slider-actions">
+              <label class="check"><input type="checkbox" id="heat-toggle" checked> Heatmap</label>
+              <label class="check"><input type="checkbox" id="ghost-toggle" checked> Original</label>
+              <a class="button" id="download-button" href="#" download>Download STL</a>
+            </div>
+          </div>
+          <input type="range" id="station-slider" min="0" max="0" step="1" value="0" aria-label="Station: conservative to extreme">
+          <div class="slider-ends"><span>Conservative</span><span id="slider-ticks" class="slider-ticks"></span><span>Extreme</span></div>
+        </div>
+        <div class="results-body">
+          <div class="tiles" id="tiles"></div>
+          <div class="charts" id="charts"></div>
+        </div>
+        <details class="table-wrap">
+          <summary>All stations</summary>
+          <div class="note" id="sweep-note" hidden></div>
+          <table class="stations" id="stations-table"></table>
+        </details>
+      </section>
+    </main>
+  </div>
+  <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>

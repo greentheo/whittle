@@ -35,6 +35,10 @@ class Station:
     build: Callable[[], Mesh] = field(repr=False)
     #: The raw design: a voxel occupancy for a load study, a genome for a flow study.
     design: object = field(default=None, repr=False)
+    #: What scored it: an :class:`~whittle.physics.fea.FEAResult` for a load
+    #: study, a :class:`~whittle.physics.drag.DragReport` for a flow study.
+    #: The stress and per-face drag in these are what a heatmap is drawn from.
+    analysis: object = field(default=None, repr=False)
     _mesh: Mesh | None = field(default=None, init=False, repr=False)
 
     @property

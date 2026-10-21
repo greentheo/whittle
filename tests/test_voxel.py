@@ -86,3 +86,18 @@ def test_rejects_bad_grids() -> None:
         Grid((4, 4, 4), 0.0)
     with pytest.raises(ValueError, match=r"empty mesh"):
         Grid.around(Mesh(np.zeros((0, 3)), np.zeros((0, 3), dtype=np.int64)))
+
+
+def test_a_click_on_a_face_selects_that_face_and_only_it() -> None:
+    grid = Grid((20, 10, 10), 1.0)
+    solid = np.zeros(grid.shape, dtype=bool)
+    solid[:8] = True  # one block
+    solid[12:] = True  # another, its +x face coplanar with nothing but itself
+    face = grid.patch((-0.5, 5.0, 5.0), (-1.0, 0.0, 0.0), solid)
+    # Two voxel layers of the clicked block's -x face, all of it.
+    assert face[:2].all() and not face[2:].any()
+    # A coplanar face on a different block is not part of the click.
+    top = grid.patch((2.0, 5.0, 9.5), (0.0, 0.0, 1.0), solid)
+    assert top[:8, :, 8:].all() and not top[12:].any()
+    with pytest.raises(ValueError, match=r"non-zero"):
+        grid.patch((0, 0, 0), (0, 0, 0), solid)
