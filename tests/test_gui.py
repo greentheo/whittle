@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from whittle import io, shapes
+from whittle import FlowStudy, io, shapes
 from whittle.gui.server import App, BadRequest, serve
 
 
@@ -124,6 +124,28 @@ def test_a_dual_study_returns_a_map_and_carved_shapes() -> None:
         app.shape_mesh(status["id"], 9)
     with pytest.raises(BadRequest, match=r"support"):
         app.start({"kind": "dual", "part": part["id"], "supports": []})
+
+
+def test_named_surfaces_reach_the_study() -> None:
+    app = App()
+    part = app.example("roof-bar")
+    setup = dict(part["setup"])
+    # Only the windward face of the bar may change.
+    setup.update(
+        part=part["id"],
+        resolution=20,
+        stations=2,
+        effort=0.2,
+        surfaces=[{"at": [20.0, 0.0, 0.0], "normal": [1.0, 0.0, 0.0]}],
+    )
+    status = _wait(app, app.start(setup)["id"])
+    assert status["state"] == "done", status["error"]
+    study = app.jobs[status["id"]].study
+    assert isinstance(study, FlowStudy)
+    weights = study.weights()
+    assert weights is not None and (weights == 0).any()
+    final = _floats(app.station_mesh(status["id"], 1)["positions"]).reshape(-1, 3)
+    assert np.allclose(final[weights == 0], study.base.vertices[weights == 0], atol=1e-3)
 
 
 def test_previewing_a_placement_returns_the_voxels_it_selects() -> None:

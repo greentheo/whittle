@@ -215,8 +215,14 @@ class DragModel:
         )
 
         squared = np.clip(s, 0.0, 1.0) ** 2
+        # Convex: shoulder suction. Concave: air trapped at full stagnation,
+        # Cp = 1 -- more than the 0.85 a flat face averages, which is relieved
+        # by the air escaping round its edges. That is what makes a cup worse
+        # than a plate, and a carved nose that dishes inward worse than a flat one.
+        convex, concave = np.clip(convexity, 0.0, 1.0), np.clip(-convexity, 0.0, 1.0)
+        flat = self.stagnation * (squared - convex * (1.0 - squared))
         cp = np.zeros(n_faces, dtype=np.float64)
-        cp[exposed] = self.stagnation * (squared - convexity * (1.0 - squared))[exposed]
+        cp[exposed] = (flat + concave * (1.0 - flat))[exposed]
         cp[leeward] = (base_cp * separated)[leeward]
 
         # Shoulder suction is real only next to the stagnation pressure that

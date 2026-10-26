@@ -70,11 +70,7 @@ def wind_forces(
     out = np.zeros((*grid.shape, 3), dtype=np.float64)
     if not solid.any() or not len(mesh.faces):
         return out
-    _, nearest = ndimage.distance_transform_edt(~solid, return_indices=True)
-    centroid = mesh.vertices[mesh.faces].mean(axis=1)
-    index = np.rint((centroid - np.asarray(grid.origin)) / grid.spacing).astype(np.int64)
-    index = np.clip(index, 0, np.asarray(grid.shape) - 1)
-    target = tuple(nearest[axis][index[:, 0], index[:, 1], index[:, 2]] for axis in range(3))
+    target = grid.nearest(mesh.vertices[mesh.faces].mean(axis=1), solid)
     q = 0.5 * air_density * speed**2 * metres_per_unit**2
     for axis in range(3):
         np.add.at(out[..., axis], target, q * report.forces[:, axis])
@@ -276,6 +272,24 @@ class DualStudy:
     ) -> DualStudy:
         """A force that acts in every case, in newtons, on top of the wind."""
         self.loads.append((force, Placement(at, box, radius, normal, depth)))
+        return self
+
+    def whittle(
+        self,
+        *,
+        at: Vector3 | None = None,
+        box: Box | None = None,
+        radius: float | None = None,
+        normal: Vector3 | None = None,
+        depth: float | None = None,
+    ) -> DualStudy:
+        """Let the carving reshape this surface; unnamed surfaces stay put.
+
+        Only the carving takes this. Lightening already keeps the whole skin
+        -- that is what keeps each shape's drag intact -- so it works inside,
+        whatever surfaces are named.
+        """
+        self.flow.whittle(at=at, box=box, radius=radius, normal=normal, depth=depth)
         return self
 
     def cargo(self, box: Box, *, kg: float = 0.0) -> DualStudy:

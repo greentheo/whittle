@@ -56,7 +56,7 @@ def main() -> None:
     # the same way: the trade-off is against strength. How conservative to be
     # is the real choice, so show the best designs at a few safety margins.
     saved = set()
-    for margin in (5.0, 20.0, 40.0):
+    for margin in (5.0, 30.0, 50.0):
         print(f"\nat least {margin:g}x safe -- nothing else is both slipperier and lighter:")
         for i, j in sweep.front(min_safety=margin):
             row, station = sweep.rows[i], sweep.rows[i].stations[j]

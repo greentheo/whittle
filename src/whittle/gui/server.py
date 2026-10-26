@@ -245,6 +245,8 @@ class App:
                 study.load(_vector(item, "force"), **_region(item))
             for item in s.get("keeps", []):
                 study.keep(**_region(item))
+            for item in s.get("surfaces", []):
+                study.whittle(**_region(item))
         except ValueError as error:
             raise BadRequest(str(error)) from error
         job.study = study
@@ -271,6 +273,8 @@ class App:
             )
             for box in s.get("keepBoxes", []):
                 study.keep(_box(box))
+            for item in s.get("surfaces", []):
+                study.whittle(**_region(item))
         except ValueError as error:
             raise BadRequest(str(error)) from error
         job.study = study
@@ -310,6 +314,8 @@ class App:
                 study.load(_vector(item, "force"), **_region(item))
             for cargo in s.get("cargo", []):
                 study.cargo(_box(cargo.get("box")), kg=_float(cargo, "kg", 0.0, 0.0, 1e5))
+            for item in s.get("surfaces", []):
+                study.whittle(**_region(item))
         except ValueError as error:
             raise BadRequest(str(error)) from error
         job.study = study

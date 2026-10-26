@@ -107,3 +107,14 @@ def test_rejects_bad_options(unit_cube: Mesh) -> None:
         FFDLattice(unit_cube, mirror=3)
     with pytest.raises(ValueError, match=r"frozen must have shape"):
         FFDLattice(unit_cube, divisions=(1, 1, 1), frozen=np.zeros((3, 3, 3, 3), dtype=bool))
+
+
+def test_weights_scale_how_far_each_vertex_follows(unit_cube: Mesh) -> None:
+    weights = np.linspace(0.0, 1.0, len(unit_cube.vertices))
+    lattice = FFDLattice(unit_cube, divisions=(1, 1, 1), weights=weights)
+    genome = np.tile([0.5, 0.0, 0.0], lattice.n_control_points)
+    moved = lattice.build(genome).vertices - unit_cube.vertices
+    # A uniform move of the lattice is a translation, scaled per vertex.
+    assert np.allclose(moved[:, 0], 0.5 * weights)
+    with pytest.raises(ValueError, match=r"one per vertex"):
+        FFDLattice(unit_cube, divisions=(1, 1, 1), weights=np.ones(3))

@@ -13,7 +13,21 @@ const G = 9.81;
 // neutral grey to red (pushes back).
 const SEQUENTIAL = ['#cde2fb', '#9ec5f4', '#6da7ec', '#3987e5', '#256abf', '#184f95', '#0d366b'];
 const DIVERGING = ['#104281', '#2a78d6', '#86b6ef', '#f0efec', '#f0a3a2', '#e34948', '#a8312f'];
-const COLORS = { support: '#2a78d6', load: '#eb6834', keep: '#1baf7a' };
+const COLORS = { support: '#2a78d6', load: '#eb6834', keep: '#1baf7a', whittle: '#6250d6' };
+
+// Which placements each study uses. Named surfaces work everywhere; a flow
+// study has no supports or loads, and a dual study keeps its whole skin.
+const TOOLS = {
+  load: ['support', 'load', 'keep', 'whittle'],
+  flow: ['whittle'],
+  dual: ['support', 'load', 'whittle'],
+};
+const PLACE_HINTS = {
+  load: 'Click the part to place where it is held and what pushes on it. Name surfaces to whittle from, or leave it to the physics.',
+  flow: 'Optionally, name the surfaces the carving may reshape: the rest stay exactly where they are.',
+  dual: 'Place where it is held. Name surfaces the carving may reshape, or let it reshape all of them.',
+};
+const relevant = (item) => TOOLS[state.kind].includes(item.type);
 const PART_COLOR = 0xb4bfcb;
 
 const state = {
@@ -353,7 +367,10 @@ function setKind(kind) {
   $('load-panel').hidden = kind === 'flow';
   $('flow-panel').hidden = kind === 'load';
   $('dual-hint').hidden = kind !== 'dual';
-  $('keep-tool').hidden = kind === 'dual';
+  document.querySelectorAll('.tool').forEach((button) => {
+    button.hidden = !TOOLS[kind].includes(button.dataset.tool);
+  });
+  $('place-hint').textContent = PLACE_HINTS[kind];
   $('extruded-field').hidden = kind === 'dual';
   $('keep-box-label').textContent = kind === 'dual' ? 'Cargo space that stays empty' : 'Protect a box inside (cargo, mattress…)';
   $('remove-label').textContent = kind === 'dual' ? 'Carve up to' : 'Remove up to';
@@ -363,6 +380,7 @@ function setKind(kind) {
   $('stations-input').value = { load: 7, flow: 6, dual: 5 }[kind];
   syncOutputs();
   drawFlow();
+  renderItems();
   if (state.part) frame();
   markStale();
   updateView();
@@ -438,9 +456,16 @@ function itemRegion(item) {
   return region;
 }
 
+// Placements are previewed on the grid the study will use: named surfaces
+// for carving on the flow grid, everything else on the structural one.
+function previewResolution(item) {
+  const carving = item.type === 'whittle' && state.kind !== 'load';
+  return Number($(carving ? 'flow-resolution' : 'load-resolution').value);
+}
+
 async function previewItem(item) {
   const preview = await post('/api/preview', {
-    part: state.part.id, resolution: Number($('load-resolution').value), ...itemRegion(item),
+    part: state.part.id, resolution: previewResolution(item), ...itemRegion(item),
   });
   removeObjects(item);
   item.count = preview.count;
@@ -475,18 +500,18 @@ function removeObjects(item) {
 function renderItems() {
   const list = $('placed-list');
   list.replaceChildren();
-  for (const item of state.items) {
+  for (const item of state.items.filter(relevant)) {
     const li = document.createElement('li');
     const dot = document.createElement('i');
     dot.className = `dot ${item.type}`;
     const label = document.createElement('span');
     label.className = 'label';
     const name = document.createElement('strong');
-    name.textContent = { support: 'Support', load: 'Load', keep: 'Keep' }[item.type];
+    name.textContent = { support: 'Support', load: 'Load', keep: 'Keep', whittle: 'Whittle from' }[item.type];
     label.append(name, document.createTextNode(` · ${describe(item)}`));
     const remove = document.createElement('button');
     remove.textContent = '×';
-    remove.setAttribute('aria-label', `Remove ${name.textContent.toLowerCase()}`);
+    remove.setAttribute('aria-label', `Remove ${name.textContent.toLowerCase()} placement`);
     remove.addEventListener('click', () => {
       removeObjects(item);
       state.items.splice(state.items.indexOf(item), 1);
@@ -637,8 +662,8 @@ renderer.domElement.addEventListener('pointerup', (event) => {
 // ---------------------------------------------------------------- running
 
 function updateRunButton() {
-  const supported = state.items.some((i) => i.type === 'support');
-  const loaded = state.items.some((i) => i.type === 'load');
+  const supported = state.items.some((i) => i.type === 'support' && relevant(i));
+  const loaded = state.items.some((i) => i.type === 'load' && relevant(i));
   const ready = state.part && (state.kind === 'flow' || (state.kind === 'dual' ? supported : supported && loaded));
   const running = state.job && ['queued', 'running'].includes(state.job.state);
   $('run-button').disabled = !ready || running;
@@ -652,6 +677,7 @@ function runBody() {
     part: state.part.id,
     removeUpTo: Number($('remove-input').value) / 100,
     stations: Number($('stations-input').value),
+    surfaces: state.items.filter((i) => i.type === 'whittle').map(itemRegion),
   };
   if (state.kind === 'load') {
     const of = (type) => state.items.filter((i) => i.type === type);
@@ -1243,7 +1269,13 @@ function updateView() {
   const dual = Boolean(state.result?.dual);
   layers.ghost.visible = showStation && !dual && $('ghost-toggle').checked;
   layers.shape.visible = showStation && dual && $('ghost-toggle').checked;
-  layers.markers.visible = state.kind !== 'flow';
+  layers.markers.visible = true;
+  for (const item of state.items) {
+    // A named surface's markers cover a whole face: useful while choosing,
+    // in the way of the result once there is one to look at.
+    const shown = relevant(item) && !(item.type === 'whittle' && showStation);
+    for (const object of item.objects || []) object.visible = shown;
+  }
   layers.flow.visible = state.kind !== 'load' && !showStation;
   drawLegend();
   updateHint();
@@ -1252,7 +1284,9 @@ function updateView() {
 function updateHint() {
   let hint = '';
   if (state.part && state.tool) {
-    const what = { support: 'where it is held', load: 'where the load goes', keep: 'material to keep' }[state.tool];
+    const what = {
+      support: 'where it is held', load: 'where the load goes', keep: 'material to keep', whittle: 'a surface to whittle from',
+    }[state.tool];
     hint = `Click the part: ${what} — ${state.select === 'face' ? 'whole face' : 'around the point'}`;
   } else if (state.part && !state.result) {
     hint = 'Drag to orbit · right-drag to pan · scroll to zoom';
@@ -1303,8 +1337,13 @@ document.querySelectorAll('#keep-box-fields input').forEach((i) => i.addEventLis
 document.querySelectorAll('#flow-panel select, #flow-panel input, #material-select').forEach((i) => i.addEventListener('change', markStale));
 $('remove-input').addEventListener('input', () => { syncOutputs(); markStale(); });
 $('stations-input').addEventListener('change', markStale);
-$('flow-resolution').addEventListener('input', syncOutputs);
 let previewTimer = null;
+$('flow-resolution').addEventListener('input', () => {
+  syncOutputs();
+  markStale();
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(refreshPreviews, 350);
+});
 $('load-resolution').addEventListener('input', () => {
   syncOutputs();
   markStale();

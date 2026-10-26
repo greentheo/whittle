@@ -47,6 +47,12 @@ class FFDLattice:
     * ``inward`` -- control points on the outside of the lattice may only move
       into it, along each axis they are on the outside of. For carving a shape
       down rather than growing it.
+
+    And one that does not shrink it: ``weights``, one per vertex, scales how
+    far each vertex follows the lattice. Zero pins a vertex where it is, one
+    lets it move freely, and a ramp between keeps the surface smooth where a
+    pinned region meets a free one. This is how only chosen surfaces get
+    reshaped while the rest stay exactly as they were.
     """
 
     changes_topology = False
@@ -61,6 +67,7 @@ class FFDLattice:
         frozen: BoolArray | None = None,
         mirror: int | None = None,
         inward: bool = False,
+        weights: FloatArray | None = None,
     ) -> None:
         if any(d < 1 for d in divisions):
             raise ValueError(f"divisions must be at least 1 in every axis, got {divisions}")
@@ -77,6 +84,13 @@ class FFDLattice:
         self.mirror = mirror
         self.inward = inward
         self._basis = self._build_basis()
+        if weights is not None:
+            weights = np.asarray(weights, dtype=np.float64)
+            if weights.shape != (len(base.vertices),):
+                raise ValueError(f"weights must be one per vertex, got {weights.shape}")
+            # Scaling a vertex's rows of the basis scales its displacement, at
+            # no cost per candidate: a vertex with weight 0 never moves.
+            self._basis = self._basis * weights[:, None]
 
         dims = tuple(d + 1 for d in divisions)
         if frozen is None:

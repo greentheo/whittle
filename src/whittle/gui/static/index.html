@@ -59,12 +59,13 @@
         </div>
         <p class="hint" id="dual-hint" hidden>Carve the outside for drag and lighten the inside for its loads, together. Place where it is held below; the wind loads come from each carved shape.</p>
 
-        <div id="load-panel" class="kind-panel">
-          <p class="hint">Click the part to place where it is held and what pushes on it.</p>
+        <div id="placement">
+          <p class="hint" id="place-hint">Click the part to place where it is held and what pushes on it.</p>
           <div class="tools" role="group" aria-label="Place">
             <button class="tool" data-tool="support" aria-pressed="false"><i class="dot support"></i>Support</button>
             <button class="tool" data-tool="load" aria-pressed="false"><i class="dot load"></i>Load</button>
             <button class="tool" data-tool="keep" id="keep-tool" aria-pressed="false"><i class="dot keep"></i>Keep</button>
+            <button class="tool" data-tool="whittle" id="whittle-tool" aria-pressed="false" title="Name the surfaces material may be taken from; the rest stay as they are"><i class="dot whittle"></i>Whittle</button>
           </div>
           <div class="field-row">
             <div class="segmented small" role="radiogroup" aria-label="What a click selects">
@@ -104,7 +105,10 @@
               <label class="field compact"><span>z</span><input type="number" id="dir-z" value="-1" step="0.1"></label>
             </div>
           </div>
-          <ul class="placed" id="placed-list" aria-label="Placed supports and loads"></ul>
+          <ul class="placed" id="placed-list" aria-label="Placed supports, loads and surfaces"></ul>
+        </div>
+
+        <div id="load-panel" class="kind-panel">
           <label class="field">
             <span>Material</span>
             <select id="material-select"></select>

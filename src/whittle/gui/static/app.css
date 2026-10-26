@@ -285,3 +285,6 @@ body.mode-dual .box-fields .dual-only { display: inline-flex; align-items: cente
 .map-legend .hollow-key { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--muted); display: inline-block; }
 @media (max-width: 860px) { .dual-sliders { grid-template-columns: 1fr; } }
 body.mode-dual .field-row.dual-only { display: flex; }
+.dot.whittle { background: #6250d6; }
+@media (prefers-color-scheme: dark) { :root:where(:not([data-theme="light"])) .dot.whittle { background: #9085e9; } }
+.tools .tool { padding: 0 6px; font-size: 13px; }

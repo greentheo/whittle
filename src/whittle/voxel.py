@@ -160,6 +160,21 @@ class Grid:
         result: BoolArray = np.isin(labels, touched)
         return result
 
+    def nearest(self, points: FloatArray, within: BoolArray) -> tuple[IntArray, IntArray, IntArray]:
+        """For each point, the index of the voxel of ``within`` nearest to it.
+
+        For points on a closed surface meshed around ``within``, that is the
+        voxel just beneath each one: how a face of a surface finds the
+        material it belongs to.
+        """
+        if not within.any():
+            raise ValueError("there is no material to find")
+        _, nearest = ndimage.distance_transform_edt(~within, return_indices=True)
+        index = np.rint((np.asarray(points) - np.asarray(self.origin)) / self.spacing)
+        index = np.clip(index.astype(np.int64), 0, np.asarray(self.shape) - 1)
+        i, j, k = (nearest[axis][index[:, 0], index[:, 1], index[:, 2]] for axis in range(3))
+        return i, j, k
+
     def voxelize(self, mesh: Mesh) -> BoolArray:
         """Solid occupancy of a closed mesh: which voxel centres are inside it.
 

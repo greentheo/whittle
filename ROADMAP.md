@@ -24,6 +24,10 @@ In build order.
   crossflow principle -- and refine along the carving axis where neighbours
   differ most. FEA load cases and distributed loads came with it. In the GUI
   as a third mode, with two sliders and a map.
+- **Choosing where material comes from.** `whittle(...)` on every study names
+  the surfaces material may come from; every other surface stays as it is --
+  a kept skin for strength, zero-weight vertices for airflow, with the carving
+  easing in over a few triangles. A "Whittle" tool in the GUI.
 - **A fast approximate drag model** (the "panel method" route of old item 4,
   done as an engineering model rather than a potential-flow solve, because
   potential flow predicts zero drag). Calibrated to textbook high-Reynolds

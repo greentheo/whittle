@@ -142,13 +142,15 @@ def beso(
     stations: list[BesoStation] = []
     note = ""
     for target in targets:
-        count = max(int(round((1.0 - target) * n_domain)), n_forced)
+        wanted = int(round((1.0 - target) * n_domain))
+        count = max(wanted, n_forced)
+        must_stay = (
+            "what is left is material that must stay -- loads, supports, kept regions, "
+            "the skin of surfaces not being whittled"
+        )
         if stations and count >= int(stations[-1].solid.sum()):
             # Only material that must stay is left: this station would repeat the last.
-            note = note or (
-                f"stopped at {stations[-1].removed:.0%} removed: what is left is material "
-                "that must stay -- loads, supports, kept regions"
-            )
+            note = note or f"stopped at {stations[-1].removed:.0%} removed: {must_stay}"
             break
         # Descend to this station's volume, a step at a time.
         while int(solid.sum()) > count:
@@ -190,6 +192,8 @@ def beso(
                 break
         solid, current = best_solid, best
         stations.append(BesoStation(1.0 - int(solid.sum()) / n_domain, solid.copy(), current))
+        if not note and wanted < n_forced:
+            note = f"stopped at {stations[-1].removed:.0%} removed: {must_stay}"
         if note:
             break
     return BesoRun(stations, note, solves)

@@ -43,6 +43,9 @@ the four examples -- and then:
 - **Airflow:** pick which way the air moves, and optionally keep the part
   symmetric, keep faces flat, protect a box inside it, or mark it as a slice
   of something long.
+- **Whittle:** in any mode, click the surfaces material may come from. Name
+  none and the physics decides everywhere; name some and every other surface
+  stays exactly as it is.
 - **Both:** the airflow set-up plus where the part is held, a cargo space
   and its weight, and a crosswind. You get two sliders -- shape for the wind,
   and lighten -- and a map of every design, mass against drag, coloured by
@@ -96,6 +99,7 @@ the GUI's slider worth dragging.
 |---|---|---|
 | you place | supports and loads (`at=` a point or `box=`) | the flow direction |
 | it protects | `keep(...)` -- bolt bosses, mating faces | `keep(box)` -- cargo space; `flat=` faces; `mirror=` |
+| `whittle(...)` names | the surfaces pockets may open onto | the surfaces the carving may reshape |
 | physics | linear-elastic FEA on a voxel grid | engineering drag model on the surface mesh |
 | search | BESO: remove the voxels doing the least work | differential evolution over a deformation lattice |
 | geometry | can open holes, grow trusses | stays one smooth closed surface, never grows |
@@ -105,6 +109,36 @@ The split is the old one this library started from. Lightening a part wants a
 representation that can open a hole -- no smooth deformation of a solid block
 will ever find a truss. Shaping against a flow wants the opposite: a surface
 that stays closed and smooth, because drag is decided by its curvature.
+
+## Choosing where material comes from
+
+Left alone, a study takes material from wherever the physics says. Often you
+know better: the face of a bracket that shows, the side of a roof box that
+has to clear a rail, the mating face that has to stay flat. Name the
+surfaces material *may* come from, with the same `at=`/`normal=` a click gives
+(or `box=`), and every other surface stays exactly as it is:
+
+```python
+study.whittle(at=(40, 8, 60), normal=(0, 1, 0))      # pocket the bracket from its front only
+roof.whittle(at=(1000, 0, 200), normal=(1, 0, 0))    # reshape the nose ...
+roof.whittle(at=(0, 0, 400), normal=(0, 0, 1))       # ... and the top, nothing else
+```
+
+- **Strength:** every surface you did not name keeps a skin, so pockets open
+  only onto the named ones. The shelf bracket pocketed from its front alone
+  keeps a solid back plate and 65% of its stiffness at half its mass, against
+  67% when it may hollow from anywhere -- a printable ribbed bracket for two
+  points of stiffness.
+- **Airflow:** each vertex of the surface follows the carving with a weight,
+  0 on surfaces you did not name and easing up to 1 over a few triangles into
+  the ones you did. Unnamed surfaces do not move at all -- zero millimetres,
+  which the tests check -- and the carved region bends smoothly where it meets
+  them instead of tearing. With a 20% budget, the roof box carved on its nose
+  and top only reached 37% of its original drag, against 34% when every
+  surface could change.
+- **Both:** naming surfaces shapes the carving. Lightening already keeps the
+  whole skin, which is what keeps each shape's drag intact, so it works inside
+  whatever you name.
 
 ## Both at once
 
@@ -142,11 +176,11 @@ that moves the answer:
 
 | at least | best design | mass | drag | safety |
 |---|---|---|---|---|
-| 5x safe | carved 25%, lightened 22% | 7.5 kg | 22% | 8x |
-| 20x safe | carved 18%, lightened 33% | 8.4 kg | 30% | 32x |
-| 40x safe | carved 13%, lightened 30% -- or 18% / 15% | 9.8 / 10.7 kg | 54% / 30% | 42x / 44x |
+| 5x safe | carved 25%, lightened 22% | 8.0 kg | 24% | 25x |
+| 30x safe | carved 18%, lightened 33% -- or 25% / 15% | 8.4 / 8.7 kg | 30% / 24% | 32x / 35x |
+| 50x safe | carved 13%, lightened 15% | 11.9 kg | 54% | 57x |
 
-At 40x a genuine choice appears between a lighter pod and a slipperier one.
+At 30x a genuine choice appears between a lighter pod and a slipperier one.
 The safety factors are high because the foam carries only 50 kg and the wind;
 they are bare foam, with no glass or carbon skin, so they are conservative.
 
@@ -222,7 +256,7 @@ can replace scipy's engine without touching anything else.
 
 ## Status
 
-**Works, tested (136 tests, ~25 s), runs today**
+**Works, tested (141 tests, ~30 s), runs today**
 
 - The web GUI -- load, click to place, run, slide, download; strength,
   airflow, or both
@@ -235,6 +269,7 @@ can replace scipy's engine without touching anything else.
 - `beso` -- bi-directional evolutionary structural optimization with stations
 - `DragModel` -- the drag estimate above, with a per-face breakdown of where
   the drag comes from
+- `whittle(...)` on every study -- choose the surfaces material comes from
 - `Grid` -- voxelizing any closed STL, selecting regions by point, face or
   box, meshing results with smoothing that keeps volume
 - `Compliance` -- the FEA as an objective for population search, replacing
@@ -274,21 +309,21 @@ Times measured on one core of an M4 laptop. Everything is written to `out/`.
 | `02_shelf_bracket.py` | `LoadStudy`: a solid bracket whittled to a truss, table above | 31 s |
 | `03_roof_box.py` | `FlowStudy`: a square 2 m roof box carved around a protected cargo block | 84 s |
 | `04_roof_bar.py` | `FlowStudy(extruded=...)`: a rectangular rack bar reshaped, as a 2D section | 35 s |
-| `05_dual_roof_box.py` | `DualStudy`: a 2 m foam pod on two bars with 50 kg of cargo, carved and lightened together | 127 s |
+| `05_dual_roof_box.py` | `DualStudy`: a 2 m foam pod on two bars with 50 kg of cargo, carved and lightened together | 132 s |
 
 The roof box, for a taste of the flow side:
 
 ```
 removed  drag     Cd  CdA m2  N @110km/h
 -------  ----  -----  ------  ----------
-     0%  100%  0.796  0.2928       167.4
-     5%   81%  0.657  0.2379       136.1
+     0%  100%  0.797  0.2930       167.6
+     5%   81%  0.657  0.2380       136.1
      9%   59%  0.484  0.1721        98.4
-    15%   32%  0.262  0.0938        53.6
-    20%   23%  0.197  0.0687        39.3
-    25%   21%  0.190  0.0609        34.8
+    14%   32%  0.262  0.0938        53.6
+    19%   23%  0.196  0.0670        38.3
+    25%   21%  0.196  0.0620        35.5
 
-80% of the available drag saving by 15% removed
+80% of the available drag saving by 14% removed
 ```
 
 The nose rounds, then slopes, then the box narrows towards the front in plan --

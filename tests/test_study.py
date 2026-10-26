@@ -191,3 +191,40 @@ def test_an_extruded_study_keeps_the_section_constant() -> None:
     assert np.allclose(moves[..., 1], 0.0)
     with pytest.raises(ValueError, match=r"drop mirror"):
         FlowStudy(bar, flow=(-1.0, 0.0, 0.0), resolution=24, extruded="y", mirror="z")
+
+
+def test_naming_a_surface_keeps_every_other_one_intact() -> None:
+    study = _shelf_bracket()
+    # Lighten only from the +y face; the -y face and the edges must stay as they are.
+    study.whittle(at=(30.0, 12.0, 45.0), normal=(0.0, 1.0, 0.0))
+    kept = study.kept()
+    assert kept[:, 0, :][study.solid[:, 0, :]].all()  # the -y layer is all kept
+    assert not kept[:, -1, :][study.solid[:, -1, :] & ~study.protected[:, -1, :]].all()
+    sweep = study.sweep(remove_up_to=0.4, stations=2)
+    last = np.asarray(sweep[-1].design)
+    assert last[:, 0, :][study.solid[:, 0, :]].all()
+    # The pockets open onto the named face, which really did lose material.
+    assert last[:, -1, :].sum() < study.solid[:, -1, :].sum()
+
+
+def test_without_named_surfaces_only_kept_regions_are_protected() -> None:
+    study = _shelf_bracket()
+    study.keep(at=(30.0, 6.0, 60.0), radius=4.0)
+    assert np.array_equal(study.kept(), study.protected)
+
+
+def test_carving_only_named_surfaces_leaves_the_rest_exactly_in_place() -> None:
+    box = shapes.box((300.0, 120.0, 80.0), center=(0.0, 0.0, 40.0), cell=10.0)
+    study = FlowStudy(box, flow=(-1.0, 0.0, 0.0), resolution=24, flat=("-z",))
+    assert study.weights() is None
+    study.whittle(at=(150.0, 0.0, 40.0), normal=(1.0, 0.0, 0.0))  # the nose only
+    weights = study.weights()
+    assert weights is not None
+    assert weights.min() == 0.0 and weights.max() == 1.0
+    noses = study.base.vertices[:, 0] > 140.0
+    tails = study.base.vertices[:, 0] < -140.0
+    assert weights[noses].mean() > 0.5 and weights[tails].max() == 0.0
+    sweep = study.sweep(remove_up_to=0.1, stations=2, effort=0.3)
+    moved = np.linalg.norm(sweep[-1].mesh.vertices - study.base.vertices, axis=1)
+    assert moved[weights == 0].max() == 0.0
+    assert moved[weights == 1].max() > 0.0

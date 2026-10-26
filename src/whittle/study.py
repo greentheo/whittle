@@ -14,6 +14,10 @@ Every method that places something takes either ``at=`` (a point, as a click
 on the surface would give) or ``box=`` (two corners), in model coordinates.
 Give ``normal=`` with ``at=`` -- the surface normal a click also gives -- to
 select the whole face under the point rather than a ball around it.
+
+Both studies also take :meth:`~LoadStudy.whittle`: the surfaces material may
+be taken from. Name none and the physics decides everywhere; name some and
+every other surface stays exactly as it is.
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 
 import numpy as np
+from scipy import ndimage
 
 from .fitness.aero import DragArea
 from .fitness.base import Objective, WeightedSum
@@ -112,6 +117,7 @@ class LoadStudy:
         self.loads: list[Load] = []
         self.supports: list[Support] = []
         self.protected = np.zeros(grid.shape, dtype=bool)
+        self.surfaces = np.zeros(grid.shape, dtype=bool)
 
     def region(
         self,
@@ -170,6 +176,39 @@ class LoadStudy:
         self.protected |= self.region(at=at, box=box, radius=radius, normal=normal, depth=depth)
         return self
 
+    def whittle(
+        self,
+        *,
+        at: Vector3 | None = None,
+        box: Box | None = None,
+        radius: float | None = None,
+        normal: Vector3 | None = None,
+        depth: float | None = None,
+    ) -> LoadStudy:
+        """Take material from this surface.
+
+        Name no surface and material may go from anywhere the physics says.
+        Name one or more, and every other surface keeps a skin and stays
+        exactly as it is: pockets open only onto the surfaces named here --
+        the back of a bracket and not its face, the underside of a shelf and
+        not its top. Material deep inside may still go either way.
+        """
+        self.surfaces |= self.region(at=at, box=box, radius=radius, normal=normal, depth=depth)
+        return self
+
+    def kept(self, *, skin: int = 1) -> BoolArray:
+        """What a sweep may not remove: kept regions, and the skin of every unnamed surface.
+
+        The skin is ``skin`` voxels of every surface not named by
+        :meth:`whittle` -- none at all if no surface has been named.
+        """
+        kept: BoolArray = self.protected.copy()
+        if self.surfaces.any():
+            cube = np.ones((3, 3, 3), dtype=bool)
+            inner = ndimage.binary_erosion(self.solid, structure=cube, iterations=skin)
+            kept |= self.solid & ~inner & ~self.surfaces
+        return kept
+
     def solver(self) -> VoxelFEA:
         if not self.loads or not self.supports:
             raise ValueError("place at least one support and one load first")
@@ -194,13 +233,15 @@ class LoadStudy:
         filter_radius: float = 1.5,
         smooth: float = 0.6,
         relax: int = 8,
+        skin: int = 1,
         callback: Callable[[int, float, float], None] | None = None,
         progress: Callable[[float], None] | None = None,
     ) -> Sweep:
         """Whittle the part down in steps, recording a design at each.
 
         ``stations`` is either a count, spread evenly from nothing removed to
-        ``remove_up_to``, or an explicit list of removal fractions.
+        ``remove_up_to``, or an explicit list of removal fractions. ``skin`` is
+        how many voxels of each surface not named by :meth:`whittle` to keep.
 
         ``progress`` is called with the fraction of the run done, for a
         progress bar; raising from it abandons the run.
@@ -229,7 +270,7 @@ class LoadStudy:
             fea,
             self.solid,
             removals=removals,
-            keep=self.protected,
+            keep=self.kept(skin=skin),
             evolution_rate=evolution_rate,
             filter_radius=filter_radius,
             callback=report,
@@ -298,6 +339,8 @@ class FlowStudy:
     axis. ``flat`` lists sides of the part's bounding box -- ``"-z"`` is the
     bottom -- that must stay flat and where they are, like a face that sits on
     roof bars. :meth:`keep` protects a box of the interior from being cut into.
+    :meth:`whittle` names the surfaces the carving may reshape; once any is
+    named, every other surface stays exactly where it is.
 
     ``extruded`` is for long parts with a constant cross-section -- a roof bar,
     a strut, a fairing strip. Model a short slice of it, name the axis it runs
@@ -346,11 +389,65 @@ class FlowStudy:
                 raise ValueError(f"sides look like '-z' or '+x', got {side!r}")
         self.speed_kmh = float(speed_kmh)
         self.keep_boxes: list[Box] = []
+        self.surfaces = np.zeros(self.grid.shape, dtype=bool)
 
     def keep(self, box: Box) -> FlowStudy:
         """Protect a box inside the part from being carved into."""
         self.keep_boxes.append(box)
         return self
+
+    def whittle(
+        self,
+        *,
+        at: Vector3 | None = None,
+        box: Box | None = None,
+        radius: float | None = None,
+        normal: Vector3 | None = None,
+        depth: float | None = None,
+    ) -> FlowStudy:
+        """Let the carving reshape this surface.
+
+        Name no surface and the whole outside may be carved. Name one or more
+        -- the nose and the top, say, and not the sides that have to clear a
+        roof rail -- and every other surface stays exactly where it is, with
+        the carving fading in smoothly over a few triangles from its edge.
+        """
+        self.surfaces |= select(
+            self.grid, self.solid, at=at, box=box, radius=radius, normal=normal, depth=depth
+        )
+        return self
+
+    def weights(self, *, ramp: int = 4) -> FloatArray | None:
+        """How far each vertex of the base mesh may follow the carving: 0 pinned, 1 free.
+
+        A face is carvable if the voxel beneath it was named by
+        :meth:`whittle`, and a vertex is free if any face around it is.
+        Free vertices within ``ramp`` rings of a pinned one ease in from 0 to
+        1, so the surface bends where a carved region meets a fixed one
+        instead of tearing or creasing. ``None`` if no surface was named.
+        """
+        if not self.surfaces.any():
+            return None
+        base = self.base
+        i, j, k = self.grid.nearest(base.vertices[base.faces].mean(axis=1), self.solid)
+        carvable = self.surfaces[i, j, k]
+        free = np.zeros(len(base.vertices), dtype=bool)
+        free[base.faces[carvable].ravel()] = True
+        if not free.any():
+            raise ValueError("the named surfaces cover none of the part's outside")
+        f = base.faces
+        pairs = np.concatenate([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]])
+        edges = np.unique(np.sort(pairs, axis=1), axis=0)
+        # Rings from the nearest pinned vertex, counted up to ``ramp``.
+        rings = np.where(free, float(ramp), 0.0)
+        for _ in range(ramp):
+            closest = np.full(len(rings), np.inf)
+            np.minimum.at(closest, edges[:, 0], rings[edges[:, 1]])
+            np.minimum.at(closest, edges[:, 1], rings[edges[:, 0]])
+            rings = np.minimum(rings, closest + 1.0)
+        t = rings / ramp
+        result: FloatArray = t * t * (3.0 - 2.0 * t)
+        return result
 
     def analyze(self, mesh: Mesh | None = None) -> DragReport:
         """Score a mesh -- by default the part itself, as re-meshed."""
@@ -375,6 +472,7 @@ class FlowStudy:
             frozen=frozen,
             mirror=self.mirror,
             inward=True,
+            weights=self.weights(),
         )
 
     def sweep(
@@ -465,9 +563,12 @@ class Carver:
         self.reference = study.model(study.base).drag_area
         self.generations = max(5, int(round(30 * effort)))
         self.seed = seed
+        # Folding is weighted heavily: where a carved surface meets one that
+        # must stay put, a big move can turn a few triangles inside out, and a
+        # handful of them should never be worth a better drag number.
         self.constraints: dict[Objective, float] = {
             StayInside(study.grid, study.solid): 5.0,
-            NoFolding(study.base): 10.0,
+            NoFolding(study.base): 50.0,
         }
         if study.keep_boxes:
             self.constraints[KeepOut(study.keep_boxes)] = 20.0
