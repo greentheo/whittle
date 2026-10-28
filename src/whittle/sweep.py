@@ -52,11 +52,12 @@ class Station:
 
 @dataclass(frozen=True)
 class Column:
-    """How to print one metric in a sweep's table."""
+    """How to print one metric in a sweep's table, or with ``design`` one entry of its design."""
 
     key: str
     label: str
     format: str
+    design: bool = False
 
 
 @dataclass
@@ -102,8 +103,11 @@ class Sweep:
         columns = [Column("removed", "removed", "{:.0%}"), *self.columns]
         rows = [[c.label for c in columns]]
         for station in self.stations:
-            values = {"removed": station.removed, **station.metrics}
-            rows.append([_cell(c, values.get(c.key)) for c in columns])
+            values: dict[str, object] = {"removed": station.removed, **station.metrics}
+            design = station.design if isinstance(station.design, dict) else {}
+            rows.append(
+                [_cell(c, design.get(c.key) if c.design else values.get(c.key)) for c in columns]
+            )
         widths = [max(len(row[i]) for row in rows) for i in range(len(columns))]
         lines = [
             "  ".join(cell.rjust(w) for cell, w in zip(row, widths, strict=True)) for row in rows
@@ -117,9 +121,9 @@ class Sweep:
         return self.table()
 
 
-def _cell(column: Column, value: float | None) -> str:
+def _cell(column: Column, value: object) -> str:
     if value is None:
         return "-"
-    if not np.isfinite(value):
+    if isinstance(value, float | int) and not np.isfinite(value):
         return "inf"
     return column.format.format(value)
