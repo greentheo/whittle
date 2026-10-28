@@ -9,6 +9,7 @@ broken export, run it through a real mesh tool before it gets here.
 from __future__ import annotations
 
 import struct
+from collections.abc import Iterable
 from pathlib import Path
 
 import numpy as np
@@ -39,20 +40,48 @@ def save(mesh: Mesh, path: str | Path) -> None:
         raise ValueError(f"unsupported mesh format {suffix!r} (expected .obj or .stl)")
 
 
+def parse(data: bytes, suffix: str) -> Mesh:
+    """Load a mesh from the bytes of a file, as an upload arrives."""
+    suffix = suffix.lower()
+    if suffix == ".obj":
+        return _parse_obj(data.decode("utf-8", errors="replace").splitlines())
+    if suffix == ".stl":
+        return _parse_stl(data)
+    raise ValueError(f"unsupported mesh format {suffix!r} (expected .obj or .stl)")
+
+
+def stl_bytes(mesh: Mesh) -> bytes:
+    """A mesh as the bytes of a binary STL, as a download leaves."""
+    a, b, c = (mesh.vertices[mesh.faces[:, i]] for i in range(3))
+    normals = np.cross(b - a, c - a)
+    lengths = np.linalg.norm(normals, axis=1, keepdims=True)
+    normals = np.divide(normals, lengths, out=np.zeros_like(normals), where=lengths > 0)
+    record = np.dtype([("normal", "<3f4"), ("corners", "<3,3f4"), ("attr", "<u2")])
+    data = np.zeros(len(mesh.faces), dtype=record)
+    data["normal"] = normals
+    data["corners"] = np.stack([a, b, c], axis=1)
+    header = b"whittle" + b"\0" * 73 + struct.pack("<I", len(mesh.faces))
+    return header + data.tobytes()
+
+
 def load_obj(path: str | Path) -> Mesh:
+    with open(path, encoding="utf-8") as handle:
+        return _parse_obj(handle)
+
+
+def _parse_obj(lines: Iterable[str]) -> Mesh:
     vertices: list[tuple[float, float, float]] = []
     faces: list[tuple[int, int, int]] = []
-    with open(path, encoding="utf-8") as handle:
-        for line in handle:
-            if line.startswith("v "):
-                x, y, z = (float(v) for v in line.split()[1:4])
-                vertices.append((x, y, z))
-            elif line.startswith("f "):
-                # OBJ indices are 1-based and may carry texture/normal fields.
-                idx = [int(tok.split("/")[0]) - 1 for tok in line.split()[1:]]
-                # Fan-triangulate anything with more than three corners.
-                for i in range(1, len(idx) - 1):
-                    faces.append((idx[0], idx[i], idx[i + 1]))
+    for line in lines:
+        if line.startswith("v "):
+            x, y, z = (float(v) for v in line.split()[1:4])
+            vertices.append((x, y, z))
+        elif line.startswith("f "):
+            # OBJ indices are 1-based and may carry texture/normal fields.
+            idx = [int(tok.split("/")[0]) - 1 for tok in line.split()[1:]]
+            # Fan-triangulate anything with more than three corners.
+            for i in range(1, len(idx) - 1):
+                faces.append((idx[0], idx[i], idx[i + 1]))
     return Mesh(
         np.asarray(vertices, dtype=np.float64).reshape(-1, 3),
         np.asarray(faces, dtype=np.int64).reshape(-1, 3),
@@ -69,7 +98,10 @@ def save_obj(mesh: Mesh, path: str | Path) -> None:
 
 
 def load_stl(path: str | Path) -> Mesh:
-    raw = Path(path).read_bytes()
+    return _parse_stl(Path(path).read_bytes())
+
+
+def _parse_stl(raw: bytes) -> Mesh:
     # An ASCII STL starts with "solid", but so do some binary ones written by
     # careless exporters. The length check is the reliable discriminator.
     if raw[:5] == b"solid" and len(raw) >= 84:
@@ -88,7 +120,7 @@ def _load_stl_binary(raw: bytes) -> Mesh:
     )
     data = np.frombuffer(raw, dtype=record, count=n_tri, offset=84)
     corners = np.asarray(data["corners"], dtype=np.float64).reshape(-1, 3)
-    return _weld(corners)
+    return weld(corners)
 
 
 def _load_stl_ascii(raw: bytes) -> Mesh:
@@ -97,10 +129,10 @@ def _load_stl_ascii(raw: bytes) -> Mesh:
         parts = line.split()
         if parts and parts[0] == "vertex":
             corners.append((float(parts[1]), float(parts[2]), float(parts[3])))
-    return _weld(np.asarray(corners, dtype=np.float64).reshape(-1, 3))
+    return weld(np.asarray(corners, dtype=np.float64).reshape(-1, 3))
 
 
-def _weld(corners: FloatArray, decimals: int = 9) -> Mesh:
+def weld(corners: FloatArray, decimals: int = 9) -> Mesh:
     """Collapse per-triangle corners into shared vertices.
 
     STL stores every triangle's corners independently, so a loaded mesh has
@@ -119,15 +151,4 @@ def _weld(corners: FloatArray, decimals: int = 9) -> Mesh:
 
 
 def save_stl(mesh: Mesh, path: str | Path) -> None:
-    a, b, c = (mesh.vertices[mesh.faces[:, i]] for i in range(3))
-    normals = np.cross(b - a, c - a)
-    lengths = np.linalg.norm(normals, axis=1, keepdims=True)
-    normals = np.divide(normals, lengths, out=np.zeros_like(normals), where=lengths > 0)
-    record = np.dtype([("normal", "<3f4"), ("corners", "<3,3f4"), ("attr", "<u2")])
-    data = np.zeros(len(mesh.faces), dtype=record)
-    data["normal"] = normals
-    data["corners"] = np.stack([a, b, c], axis=1)
-    with open(path, "wb") as handle:
-        handle.write(b"whittle" + b"\0" * 73)
-        handle.write(struct.pack("<I", len(mesh.faces)))
-        handle.write(data.tobytes())
+    Path(path).write_bytes(stl_bytes(mesh))

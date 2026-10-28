@@ -58,6 +58,8 @@ def evolve(
     recombination: float = 0.7,
     workers: int = 1,
     polish: bool = False,
+    x0: Genome | None = None,
+    spread: float | None = None,
     callback: Callable[[int, float], None] | None = None,
 ) -> EvolutionResult:
     """Evolve a genome for ``backend`` that minimizes ``objective``.
@@ -69,6 +71,13 @@ def evolve(
 
     Parameters whose bounds have zero width are held fixed and excluded from the
     search, which is what makes ``FFDLattice(frozen_axes=...)`` do anything.
+
+    ``x0`` warm-starts the search from a known genome. With ``spread`` as
+    well, the whole initial population is drawn around ``x0`` -- uniformly
+    within ``spread`` of each parameter's range either side -- rather than
+    across the full bounds. That is the right start for refining a design
+    that is already good, and it is what keeps neighbouring stations of a
+    sweep looking like each other.
     """
     bounds = list(backend.bounds)
     if len(bounds) != backend.n_params:
@@ -103,6 +112,19 @@ def evolve(
             callback(len(history), value)
         return False
 
+    init: str | FloatArray = "latinhypercube"
+    start: FloatArray | None = None
+    if x0 is not None:
+        start = np.clip(np.asarray(x0, dtype=np.float64).ravel(), lows, highs)[free]
+        if spread is not None:
+            rng = np.random.default_rng(seed)
+            width = (highs - lows)[free]
+            n = max(5, popsize * int(free.sum()))
+            population = start + rng.uniform(-spread, spread, (n, int(free.sum()))) * width
+            init = np.clip(population, lows[free], highs[free])
+            init[0] = start
+            start = None
+
     outcome = differential_evolution(
         cost,
         bounds=[(float(lo), float(hi)) for lo, hi in zip(lows[free], highs[free], strict=True)],
@@ -114,7 +136,8 @@ def evolve(
         recombination=recombination,
         workers=workers,
         polish=polish,
-        init="latinhypercube",
+        init=init,
+        x0=start,
         callback=on_step,
     )
 

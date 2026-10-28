@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import numpy as np
 from scipy import ndimage
 
 from ..geometry.density import DensityField
+from ..physics.fea import Load, Material, Support, VoxelFEA
 from .base import Candidate
 
 
@@ -18,11 +21,10 @@ class AnchorConnectivity:
     anything, and nowhere near sufficient. A single-voxel thread satisfies it
     and would snap instantly.
 
-    It earns its place for one reason: it makes the pipeline runnable today
-    without an FEA solver, so the search loop, the backends and the export can
-    be exercised and tested for real. Replacing it with :class:`Compliance` is
-    the first item in ROADMAP.md, and the API is shaped so that it is a
-    one-line substitution at the call site.
+    It still earns a place now that :class:`Compliance` exists: it costs a
+    labelling pass instead of an FEA solve, so it can cheaply steer an early
+    search towards connected designs before the expensive objective takes
+    over, or stand in on a grid too large to solve thousands of times.
 
     When the anchors are disconnected the penalty is the distance still to be
     bridged, normalized by the grid diagonal, rather than a flat failure. A flat
@@ -67,37 +69,72 @@ class AnchorConnectivity:
 
 
 class Compliance:
-    """Strain energy under load: the real measure of stiffness per unit material.
+    """Work done by the loads -- the standard measure of how stiff a part is.
 
-    Not implemented. This is the centre of the project, and a placeholder is
-    worse than an honest gap -- a stub that returned a plausible-looking number
-    would let the whole pipeline produce confident, meaningless results.
+    Scored on the material a candidate would actually print: the field
+    thresholded at the backend's threshold, solid or nothing, not the grey
+    intermediate densities. What is meshed and exported is the thresholded
+    geometry, so that is what the physics should judge.
 
-    What it needs, in the order it should be built (see ROADMAP.md):
+    Reported relative to the design box filled solid wherever ``void`` allows
+    -- the stiffest thing that box can be -- so it is 1.0 at best and climbs
+    as material goes, and sits beside :class:`~whittle.fitness.mass.MaterialFraction`
+    in a :class:`~whittle.fitness.base.WeightedSum` without a scale factor.
 
-    1. A linear-elastic FEA solve on the voxel grid, trilinear hex elements,
-       with density interpolated as ``E(rho) = E_min + rho**p * (E_0 - E_min)``
-       -- the SIMP penalization, with ``p`` around 3, which is what pushes
-       intermediate densities toward solid or void instead of grey mush.
-    2. A conjugate-gradient solve with a matrix-free element-by-element
-       operator. Assembling a global stiffness matrix for a 48x24x24 grid is
-       possible; doing it once per candidate per generation is not.
-    3. Reuse of the previous generation's solution as the starting guess, since
-       candidates are mostly similar to their parents.
+    A candidate whose loads are not joined to a support by material has no
+    static answer; it scores ``unsupported``, high enough that any connected
+    design beats it.
 
-    Until this exists, :class:`AnchorConnectivity` stands in and the README says
-    plainly that the structural claim is unproven.
+    This is the objective for a population search (:func:`whittle.evolve`)
+    over a :class:`~whittle.geometry.density.DensityField`. It pays one FEA
+    solve per candidate, so keep the grid small. To lighten a part, the
+    sensitivity-driven :func:`whittle.optimize.beso.beso`, which
+    :class:`whittle.LoadStudy` runs, needs a hundred solves where this would
+    need tens of thousands.
     """
 
     name = "compliance"
 
-    def __init__(self, *, load: object = None, supports: object = None) -> None:
-        self.load = load
-        self.supports = supports
+    def __init__(
+        self,
+        *,
+        loads: Sequence[Load],
+        supports: Sequence[Support],
+        material: str | Material = "pla",
+        unsupported: float = 1e3,
+    ) -> None:
+        self.loads = list(loads)
+        self.supports = list(supports)
+        self.material = material
+        self.unsupported = float(unsupported)
+        self._backend: DensityField | None = None
+        self._fea: VoxelFEA | None = None
+        self._reference = 1.0
+
+    def solver(self, backend: DensityField) -> VoxelFEA:
+        """The solve for this backend's grid, built once and reused."""
+        if self._fea is None or self._backend is not backend:
+            fea = VoxelFEA(
+                backend.shape,
+                spacing=backend.spacing,
+                material=self.material,
+                loads=self.loads,
+                supports=self.supports,
+            )
+            filled = np.ones(backend.shape, dtype=bool)
+            if backend.void is not None:
+                filled &= ~backend.void
+            reference = fea.solve(filled)
+            if not reference.supported:
+                raise ValueError("even the full design box does not connect the loads to a support")
+            self._fea, self._backend, self._reference = fea, backend, reference.compliance
+        return self._fea
 
     def __call__(self, candidate: Candidate) -> float:
-        raise NotImplementedError(
-            "Compliance needs an FEA solver, which is ROADMAP.md item 1. "
-            "Use AnchorConnectivity for a geometric proxy in the meantime, and "
-            "do not read a structural claim into results produced with it."
-        )
+        backend = candidate.backend
+        if not isinstance(backend, DensityField):
+            raise TypeError("Compliance requires a DensityField backend")
+        result = self.solver(backend).solve(candidate.field >= backend.threshold, rtol=1e-4)
+        if not result.supported:
+            return self.unsupported
+        return result.compliance / self._reference
