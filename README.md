@@ -331,6 +331,36 @@ frame shaken on the road wants. The receiver holds 170 lb and 6,600 lb-in
 standing still: that, not the 100 lb of gear, is the number to put against
 the hitch's rating.
 
+## Plates: gussets for the plasma table
+
+The corners of a welded frame are where it cracks on the road, and a pair of
+gusset plates is what keeps it from cracking. A plate study takes a flat
+plate -- an outline and a thickness -- with welds that hold it and welds that
+load it, lightens it, and hands back plates a plasma table can cut:
+
+```python
+plate = frame.gusset("jog_low", riser, shank, thickness=4.7625)  # 3/16" cheek plates
+sweep = plate.sweep(remove_up_to=0.5)                             # whole to lightened
+sweep[2].design.save("gusset.dxf")                                # R12 DXF in mm, or .svg
+sweep[2].note        # how much of the corner's moment the plates take off its weld
+plate.placement      # where the plate sits in the frame, to draw it in 3D
+```
+
+`FrameStudy.gusset()` puts cheek plates -- one each side of the tubes -- in
+the plane two members span where they meet, over a band of each tube, and
+loads them with what the frame says one member pushes into the joint.
+Lightening only makes holes through the plate, and each station is cleaned
+up before it is checked again as it will be cut: no hole narrower than
+`min_hole`, no web narrower than `min_web`, a solid rim round the outline and
+a margin beside every weld. `PlateStudy` is the same for any plate, with
+`fix()`, `load()` and `keep()` on polygons of its own.
+
+`examples/08_hitch_gussets.py` puts 3/16" plates on both corners of example
+07's riser. The lightest pair that keeps 3.5x is 4.0x at each corner, with
+two holes each -- a strut across the corner between them -- and takes about
+80% of the corner's 10,970 lb-in off the tube-to-tube weld. On a 6" riser the
+plates at the two corners meet, and the study says to cut each side as one.
+
 ## How far to trust it
 
 **Structure -- validated.** Eight-node hexahedra, one per voxel, solved by
@@ -363,6 +393,15 @@ their own, which flatters a column free at one end. A sandwich wall given
 as a section transformed to its skin is checked against the skin's
 strength alone -- not core shear, skin wrinkling or the fixings that hold
 it on, which are how sandwich panels usually fail.
+
+**Plates -- the voxel solver, a layer thick.** A plate is one layer of
+voxels with its loads scaled to the plate's thickness, so the stress is the
+real plate's at any voxel size. Against a beam it reads about 12% low, like
+the parts above, and the plates are taken to carry all of the joint's
+moment, which they do not -- the tube-to-tube weld carries some too. How
+much they take off that weld is shared by stiffness: an estimate, and the
+number to watch for fatigue. Plates are in plane only: buckling of a long
+free edge, and the welds' own strength, are not checked.
 
 **Aero -- an engineering estimate, not CFD.** `DragModel` scores a mesh in
 about a millisecond from the few facts that decide most of the drag of a
@@ -417,10 +456,12 @@ can replace scipy's engine without touching anything else.
 
 ## Status
 
-**Works, tested (182 tests, ~58 s), runs today**
+**Works, tested (188 tests, ~61 s), runs today**
 
 - `FrameStudy` -- size the tubes of a welded frame: stress, buckling,
   deflection and what the supports hold, from a catalog of real tube
+- `PlateStudy` and `FrameStudy.gusset()` -- gusset plates at a frame's
+  joints, lightened and written out as DXF and SVG for a plasma table
 - `ParametricStudy` -- tune a parametric model's own dimensions for drag,
   CadQuery or otherwise, with the same slider
 - Obstacles -- fixed bodies a part rides in the wake of, like the car in
@@ -481,6 +522,7 @@ Times measured on one core of an M4 laptop. Everything is written to `out/`.
 | `05_dual_roof_box.py` | `DualStudy`: a 2 m foam pod on two bars with 50 kg of cargo, carved and lightened together | 129 s |
 | `06_parametric_hitch_box.py` | `ParametricStudy`: five dimensions of a lofted hitch box, tuned in free air and behind the car (`obstacles=`) | 200 s |
 | `07_hitch_frame.py` | `FrameStudy`: the steel tube frame of a hitch cargo platform, sized for bumps | 1 s |
+| `08_hitch_gussets.py` | `FrameStudy.gusset()`: 3/16" plates for both corners of that frame's riser, as DXF and SVG | 8 s |
 
 The roof box, for a taste of the flow side:
 

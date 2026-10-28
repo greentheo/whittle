@@ -5,7 +5,7 @@ down until the air slips past it. Bring a part, say what pushes on it or which
 way the wind blows, and get back a slider of designs from conservative to
 extreme.
 
-    from whittle import LoadStudy, FlowStudy, ParametricStudy, FrameStudy, io
+    from whittle import LoadStudy, FlowStudy, ParametricStudy, FrameStudy, PlateStudy, io
 
 See README.md for what is implemented and how far to trust it.
 """
@@ -45,6 +45,7 @@ from .physics import (
     tube,
     tube_size,
 )
+from .plate import Cut, Placement, PlateStudy
 from .study import FlowStudy, LoadStudy
 from .sweep import Station, Sweep
 from .types import Mesh
@@ -58,6 +59,7 @@ __all__ = [
     "AnchorConnectivity",
     "BuildFailed",
     "Candidate",
+    "Cut",
     "Compliance",
     "DensityField",
     "DragArea",
@@ -83,6 +85,8 @@ __all__ = [
     "MeshVolume",
     "NoFolding",
     "ParametricStudy",
+    "Placement",
+    "PlateStudy",
     "StayInside",
     "Section",
     "Station",

@@ -30,6 +30,7 @@ from itertools import combinations
 from typing import Any
 
 import numpy as np
+from scipy.spatial import ConvexHull
 
 from .physics.fea import Material, material
 from .physics.frame import (
@@ -43,6 +44,7 @@ from .physics.frame import (
     _axes,
     section,
 )
+from .plate import Placement, PlateStudy, Relief
 from .sweep import Column, Station, Sweep
 from .types import FloatArray, Mesh, Vector3
 
@@ -515,6 +517,165 @@ class FrameStudy:
         """Every member as a straight bar of its outer section, for a look or a print."""
         return _frame_mesh(self, list(self.sections if sections is None else sections))()
 
+    # -- plates ------------------------------------------------------------------
+
+    def gusset(
+        self,
+        node: int | str,
+        first: int,
+        second: int,
+        *,
+        thickness: float,
+        plates: int = 2,
+        reach: float | None = None,
+        case: str | None = None,
+        sections: Sequence[Section] | None = None,
+        material: str | Material | None = None,
+        spacing: float | None = None,
+        resolution: int = 80,
+    ) -> PlateStudy:
+        """Gusset plates at a joint, loaded with what the frame says the joint carries.
+
+        Cheek plates, ``plates`` of them -- one each side of the tubes --
+        lying in the plane ``first`` and ``second`` span where they meet at
+        ``node``. Each is welded over a band of each tube running ``reach``
+        mm from the joint (four times the tube's depth by default, and no
+        further than the member goes), and its outline is the hull of the
+        two bands.
+
+        The second member's band is held and the first member's carries what
+        that member pushes into the joint -- in the case with the largest
+        moment in the plates' plane, or ``case`` -- shared out over the
+        plates as if they carried all of it. They do not: the tube-to-tube
+        weld carries some too, and each station of the sweep says how much
+        of the joint's moment the plates take off that weld.
+
+        Plate coordinates run from the node, ``u`` along the first member and
+        ``v`` across it towards the second; :attr:`PlateStudy.placement`
+        puts them back in the frame.
+        """
+        n = self._node(node)
+        for m in (first, second):
+            if not 0 <= m < len(self.members) or n not in self.members[m]:
+                raise ValueError(f"member {m} does not meet node {node!r}")
+        if first == second:
+            raise ValueError("a gusset joins two different members")
+        chosen = list(self.sections if sections is None else sections)
+        model = self._model()
+        result = self.analyze(chosen)
+        origin = np.asarray(self.nodes[n])
+
+        def away(m: int) -> tuple[FloatArray, float]:
+            a, b = self.members[m]
+            span = np.asarray(self.nodes[b if a == n else a]) - origin
+            length = float(np.linalg.norm(span))
+            return span / length, length
+
+        (along_a, length_a), (along_b, length_b) = away(first), away(second)
+        normal = np.cross(along_a, along_b)
+        if np.linalg.norm(normal) < 1e-6:
+            raise ValueError("the members are in line: a gusset needs a corner")
+        normal /= np.linalg.norm(normal)
+        u, v = along_a, np.cross(normal, along_a)
+
+        def across(m: int, direction: FloatArray) -> float:
+            _, y, z = model.rotation[m]
+            section = chosen[m]
+            return float(abs(direction @ y) * section.width + abs(direction @ z) * section.height)
+
+        depth_a = across(first, np.cross(normal, along_a))
+        depth_b = across(second, np.cross(normal, along_b))
+        reach_a = reach if reach is not None else min(4.0 * depth_a, length_a)
+        reach_b = reach if reach is not None else min(4.0 * depth_b, length_b)
+
+        def band(along: FloatArray, depth: float, start: float, far: float) -> FloatArray:
+            side = np.cross(normal, along)
+            half = depth / 2.0
+            ends = ((start, -half), (start, half), (far, half), (far, -half))
+            corners = [s * along + w * side for s, w in ends]
+            return np.array([[c @ u, c @ v] for c in corners])
+
+        band_a = band(along_a, depth_a, -depth_b / 2.0, reach_a)
+        band_b = band(along_b, depth_b, -depth_a / 2.0, reach_b)
+        corners = np.vstack([band_a, band_b])
+        outline = corners[ConvexHull(corners).vertices]
+        plate = PlateStudy(
+            outline,
+            thickness=thickness,
+            material=self.material if material is None else material,
+            spacing=spacing,
+            resolution=resolution,
+        )
+        held = plate.mask(band_b)
+        loaded = plate.mask(band_a) & ~held
+
+        near = self.members[first][0] == n
+        turn = model.rotation[first]
+
+        def pushed(c: CaseResult) -> tuple[FloatArray, FloatArray]:
+            """What the first member pushes into the joint, in frame axes: force and moment."""
+            ends = c.end_forces[first, :6] if near else c.end_forces[first, 6:]
+            return -(turn.T @ ends[:3]), -(turn.T @ ends[3:])
+
+        if case is None:
+            case = max(result.cases, key=lambda k: abs(pushed(result.cases[k])[1] @ normal))
+        elif case not in result.cases:
+            raise ValueError(f"no load case {case!r}; there are {sorted(result.cases)}")
+        force, moment = pushed(result.cases[case])
+        plate.fix(held)
+        plate.load(
+            loaded,
+            force=(float(force @ u) / plates, float(force @ v) / plates),
+            moment=float(moment @ normal) / plates,
+            about=(0.0, 0.0),
+        )
+        plate.placement = Placement(*(_vector(a) for a in (origin, u, v, normal)))
+
+        names = {i: k for k, i in self.names.items()}
+        label = (
+            f"the {self.groups[first] or f'member {first}'}-to-"
+            f"{self.groups[second] or f'member {second}'} weld at {names.get(n, f'node {n}')}"
+        )
+        bend = []
+        for m, start, far in ((first, -depth_b / 2.0, reach_a), (second, -depth_a / 2.0, reach_b)):
+            _, y, z = model.rotation[m]
+            inertia = (normal @ y) ** 2 * chosen[m].iy + (normal @ z) ** 2 * chosen[m].iz
+            bend.append((start + far) / 2.0 / (self._made_of(m).youngs_modulus * inertia))
+        plate.relief = Relief(
+            weld=label,
+            moment=abs(float(moment @ normal)),
+            case=case,
+            tube_stiffness=1.0 / sum(bend),
+            plates=plates,
+            region=loaded,
+        )
+
+        sideways = abs(float(force @ normal))
+        twisting = float(np.hypot(moment @ u, moment @ v))
+        if sideways > 1.0 or twisting > 0.01 * abs(float(moment @ normal)):
+            plate.notes.append(
+                f"{case}: {sideways:.0f} N across the plates and {twisting / 1000:.0f} N m out "
+                "of their plane go through the tubes and their own weld, not the plates"
+            )
+        for m, far, length in ((first, reach_a, length_a), (second, reach_b, length_b)):
+            if far > 0.5 * length:
+                plate.notes.append(
+                    f"the plates run {far / length:.0%} of the way along "
+                    f"{self.groups[m] or f'member {m}'}: if the joint at its other end has "
+                    "plates too, cut each side as one plate over both"
+                )
+        thick_a = across(first, normal)
+        thick_b = across(second, normal)
+        if abs(thick_a - thick_b) > 0.5:
+            narrow = (first, thick_a) if thick_a < thick_b else (second, thick_b)
+            plate.notes.append(
+                f"the tubes are {thick_a:.1f} and {thick_b:.1f} mm across: a flat plate on "
+                f"each side needs a {abs(thick_a - thick_b) / 2:.1f} mm spacer on "
+                f"{self.groups[narrow[0]] or f'member {narrow[0]}'}, or tubes the same width"
+            )
+        plate.offset = (max(thick_a, thick_b) + thickness) / 2.0
+        return plate
+
     # -- internals ---------------------------------------------------------------
 
     def _node(self, ref: int | str) -> int:
@@ -583,6 +744,10 @@ class FrameStudy:
             )
             loads[name] = (nodal * case.factor, spread * case.factor, points)
         return loads
+
+
+def _vector(a: FloatArray) -> Vector3:
+    return (float(a[0]), float(a[1]), float(a[2]))
 
 
 def _material(spec: str | Material) -> Material:
