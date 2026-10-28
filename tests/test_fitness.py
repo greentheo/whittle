@@ -177,6 +177,11 @@ def test_shape_constraints_catch_violations() -> None:
     assert StayInside(grid, solid)(scaled(1.2)) > 1.0
     assert VolumeBudget(sphere.volume, 0.1)(scaled(0.8)) == pytest.approx(1 - 0.8**3 - 0.1)
     assert KeepOut([((-9, -9, -9), (9, 9, 9))])(scaled(0.5)) > 0.0
+    # Three vertices of 20,000 cutting 10 mm into a 250 mm box: far past the
+    # thousandth a study lets through, not averaged away by the rest.
+    vertices = np.vstack([np.full((19997, 3), 500.0), [[10.0, 125.0, 125.0]] * 3])
+    dented = Candidate(np.zeros(1), _Fixed(Mesh(vertices, np.zeros((1, 3), dtype=np.int64))))
+    assert KeepOut([((0, 0, 0), (250, 250, 250))])(dented) > 0.03
     inside_out = Mesh(sphere.vertices, np.ascontiguousarray(sphere.faces[:, ::-1]))
     inverted = Candidate(np.zeros(1), _Fixed(inside_out))
     assert NoFolding(sphere)(inverted) == pytest.approx(1.0)

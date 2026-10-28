@@ -49,6 +49,15 @@ In build order.
   15% heavy -- worst on a lightened foam pod, which is mostly skin. Material
   taken away still meshes on voxel boundaries, which is all there is to know
   about it. `Grid.coverage` measures the fraction exactly along each ray.
+- **Frames.** `FrameStudy` models tube structures as beams along their
+  centrelines -- 3D frame elements, rigid joints, square tube and bar from a
+  catalog -- and sweeps the tube of each group of members up or down until
+  the lightest frame that keeps its safety factor. Reports stress, Euler
+  buckling, deflection and the reactions at the supports, and flags fatigue
+  territory under 3.5x. Built for Caliper's hitch platform frame. Members
+  are Timoshenko beams and can each have their own material, so a camper
+  box's foam-cored walls carry load beside the steel; loads can sit at any
+  point along a member.
 - **Obstacles.** Fixed bodies a part rides in the wake of -- the car in front
   of a hitch box -- shelter it without being scored or moved, in the drag
   model, `FlowStudy` and `ParametricStudy`.
@@ -125,6 +134,21 @@ the drag and the two have to alternate. That needs a flow representation that
 can hold holes, which the deformation lattice cannot: the drag model scoring
 the marching-cubes surface of a density field is the obvious route, and the
 terracing it brings is the obvious problem.
+
+## Next for frames
+
+- **Plate mode.** Lighten a gusset as a 2D plate a plasma table can cut: an
+  outline and a thickness in, through-holes out as DXF and SVG, with
+  minimum hole and web sizes and a margin along the welds. A one-voxel-thick
+  `LoadStudy` already gets most of the way; the frame study's end forces at
+  a joint are what to load the gusset with (`CaseResult.end_forces`).
+- **Legs and the parked case.** How a load splits between a hitch and legs
+  depends on how the legs are set and how the car settles on its springs:
+  supports with stiffness, and both bounds reported.
+- **Dropping members,** not just resizing them: start from every brace that
+  could be there and take away the ones that carry least.
+- **Effective lengths.** Buckling takes each member's own length; a column
+  free at one end buckles at twice it.
 
 ## Open questions
 

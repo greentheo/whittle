@@ -8,16 +8,23 @@ building the part and testing it.
 
 from .drag import DragModel, DragReport
 from .fea import MATERIALS, FEAResult, FieldLoad, Load, Material, Support, VoxelFEA, material
+from .frame import TUBES, Section, section, tube, tube_dimensions, tube_size
 
 __all__ = [
     "MATERIALS",
+    "TUBES",
     "DragModel",
     "DragReport",
     "FEAResult",
     "FieldLoad",
     "Load",
     "Material",
+    "Section",
     "Support",
     "VoxelFEA",
     "material",
+    "section",
+    "tube",
+    "tube_dimensions",
+    "tube_size",
 ]

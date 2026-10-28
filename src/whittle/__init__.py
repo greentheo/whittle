@@ -5,7 +5,7 @@ down until the air slips past it. Bring a part, say what pushes on it or which
 way the wind blows, and get back a slider of designs from conservative to
 extreme.
 
-    from whittle import LoadStudy, FlowStudy, ParametricStudy, io
+    from whittle import LoadStudy, FlowStudy, ParametricStudy, FrameStudy, io
 
 See README.md for what is implemented and how far to trust it.
 """
@@ -26,19 +26,24 @@ from .fitness import (
     VolumeBudget,
     WeightedSum,
 )
+from .frame import FrameResult, FrameStudy
 from .geometry import DensityField, FFDLattice
 from .optimize import EvolutionResult, beso, evolve
 from .parametric import BuildFailed, ParametricStudy
 from .physics import (
     MATERIALS,
+    TUBES,
     DragModel,
     DragReport,
     FEAResult,
     FieldLoad,
     Load,
     Material,
+    Section,
     Support,
     VoxelFEA,
+    tube,
+    tube_size,
 )
 from .study import FlowStudy, LoadStudy
 from .sweep import Station, Sweep
@@ -49,6 +54,7 @@ __version__ = "0.2.0"
 
 __all__ = [
     "MATERIALS",
+    "TUBES",
     "AnchorConnectivity",
     "BuildFailed",
     "Candidate",
@@ -65,6 +71,8 @@ __all__ = [
     "FFDLattice",
     "FieldLoad",
     "FlowStudy",
+    "FrameResult",
+    "FrameStudy",
     "Grid",
     "KeepOut",
     "Load",
@@ -76,6 +84,7 @@ __all__ = [
     "NoFolding",
     "ParametricStudy",
     "StayInside",
+    "Section",
     "Station",
     "Support",
     "Sweep",
@@ -87,4 +96,6 @@ __all__ = [
     "evolve",
     "io",
     "shapes",
+    "tube",
+    "tube_size",
 ]

@@ -86,8 +86,10 @@ class KeepOut:
     """How deep the candidate's surface cuts into boxes that must stay whole.
 
     For the volume a part exists to enclose: the mattress in a rooftop tent,
-    the cargo in a roof box. Mean penetration of vertices inside each box, as
-    a fraction of that box's smallest side.
+    the cargo in a roof box. Penetration of vertices inside each box, as a
+    fraction of that box's smallest side: the mean, for the search to steer
+    by, plus the deepest, so that on a fine mesh a few vertices cutting deep
+    do not average out to nothing and pass as feasible.
     """
 
     name = "intrusion"
@@ -102,8 +104,8 @@ class KeepOut:
         v = candidate.mesh.vertices
         total = 0.0
         for lo, hi in self.boxes:
-            depth = np.minimum(v - lo, hi - v).min(axis=1)
-            total += float(np.mean(np.maximum(depth, 0.0))) / float((hi - lo).min())
+            depth = np.maximum(np.minimum(v - lo, hi - v).min(axis=1), 0.0)
+            total += float(depth.mean() + depth.max()) / float((hi - lo).min())
         return total
 
 

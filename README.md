@@ -270,6 +270,67 @@ where the parameters reach their bounds. The model treats everything inside
 the car's silhouette as sheltered, which flatters the box behind it: trust the
 change of strategy more than the 307 N.
 
+## Frames: tube structures
+
+A 2" square tube with a 1/8" wall is 3 mm of steel on a frame nearly two
+metres across -- far below what a voxel grid can see. A frame study models
+each member as a beam along its centreline instead, with the real area and
+stiffness of its tube, joined rigidly at the nodes, and sizes the tubes:
+
+```python
+from whittle import FrameStudy
+
+frame = FrameStudy("steel")
+inner, mouth = frame.node((228.6, 0, 228.6)), frame.node((76.2, 0, 228.6))
+...                                                   # nodes along the centrelines
+frame.member(inner, mouth, "2x2x1/8", group="shank")  # tubes by size, in inches
+frame.support(mouth, fix=("ux", "uy", "uz", "rx"))    # a receiver: a socket and a pin
+frame.support(inner, fix=("uy", "uz"))
+frame.case("driving", factor=2.5)                     # bumps, the frame's own weight included
+frame.spread(rail, total=(0, 0, -222), case="driving")
+frame.point(cross, 0.4, force=(0, 0, -90), case="driving")  # or at a point along it
+result = frame.analyze()                              # stress, safety, deflection per member
+sweep = frame.sweep(groups={"shank": ["2x2x1/4", "2x2x5/16", "2x2xsolid"], ...})
+sweep[-1].design                                      # {"shank": "2x2xsolid", ...}
+```
+
+`TUBES` holds the square tube and bar a fabricator can buy, keyed like
+`"2x2x1/8"`, with `tube_size()` turning a key back into millimetres. Its
+strength and stiffness match AISC's published tables to within 1%, at
+their design wall of 0.93 of nominal, and its weight matches the catalog's,
+which is at the nominal wall. `group` ties members cut from the same stock,
+so a sweep sizes them together; it steps each group up or down its list of
+tubes one size at a time -- first adding material where it closes the most
+of the shortfall per kilogram if the frame as drawn falls short, then taking
+it away where it costs the least -- and each station is one size step from
+the last. Where no one step helps -- a heavier arm fixes the arm but
+overloads the shank it hangs from -- it steps two groups together, or jumps
+one further. `FrameStudy.from_dict()` takes the whole frame as plain data, as
+another program would hand it over.
+
+A member can be something other than tube: a foam-cored wall carrying load
+beside the steel, say, given as its section's numbers and a material of its
+own (`material=`, or `"material"` in the dict). A sweep leaves those members
+as they are unless it is told what they may be.
+
+`examples/07_hitch_frame.py` is the steel frame of a hitch cargo platform:
+a shank in a 2" receiver, a 6" riser, an upper shank running back 50", and a
+ladder 60" wide on top, 100 lb of gear on it, taken at 2.5x for bumps:
+
+| | shank | riser | upper shank | rails | cross | mass | safety |
+|---|---|---|---|---|---|---|---|
+| as drawn | 2x2x1/8 | 2x2x1/8 | 2x2x1/8 | 2x2x1/8 | 2x2x1/8 | 31.6 kg | 1.0x |
+| where the sweep ends | 2x2 solid | 2x2 solid | 3x3x1/8 | 1x1x1/16 | 2x2x0.083 | 32.8 kg | 3.2x |
+
+As drawn, the shank yields inside the receiver the first time the car hits
+a bump hard. The sweep's first moves are free: lighter rails and cross
+members, which carry little, take weight off the end of a long lever. Then
+it thickens the shank and riser up to solid bar -- the strongest thing that
+fits a 2" receiver -- and that caps it at 3.2x, short of the 3.5x a welded
+frame shaken on the road wants. The receiver holds 170 lb and 6,600 lb-in
+standing still: that, not the 100 lb of gear, is the number to put against
+the hitch's rating.
+
 ## How far to trust it
 
 **Structure -- validated.** Eight-node hexahedra, one per voxel, solved by
@@ -286,6 +347,22 @@ honest gaps are in the inputs, not the solver:
   strut that the table calls safe can buckle.
 - **Resolution sets the finest member.** About 48 voxels along the longest side
   is the default; members come out at least two to three voxels thick.
+
+**Frames -- validated, with one big blind spot.** Members are Timoshenko
+beams, so shear counts where it matters -- a deep, foam-cored wall bends in
+shear about as much as in bending -- and barely at all in a tube.
+Deflection and twist match beam theory exactly and stress to within 1%, and
+tube properties and weights match the AISC tables. What a frame model
+cannot see is the weld: joints are perfectly rigid and stress is the
+nominal stress in the tube, where a real weld concentrates it at its toe.
+Welded steel under road vibration fails there, by fatigue, at stresses well
+below yield -- which is why a frame study flags anything under 3.5x and why
+the margins it asks for look generous. Compression members are checked
+against Euler buckling, eased by shear, with an effective length equal to
+their own, which flatters a column free at one end. A sandwich wall given
+as a section transformed to its skin is checked against the skin's
+strength alone -- not core shear, skin wrinkling or the fixings that hold
+it on, which are how sandwich panels usually fail.
 
 **Aero -- an engineering estimate, not CFD.** `DragModel` scores a mesh in
 about a millisecond from the few facts that decide most of the drag of a
@@ -340,8 +417,10 @@ can replace scipy's engine without touching anything else.
 
 ## Status
 
-**Works, tested (161 tests, ~51 s), runs today**
+**Works, tested (182 tests, ~58 s), runs today**
 
+- `FrameStudy` -- size the tubes of a welded frame: stress, buckling,
+  deflection and what the supports hold, from a catalog of real tube
 - `ParametricStudy` -- tune a parametric model's own dimensions for drag,
   CadQuery or otherwise, with the same slider
 - Obstacles -- fixed bodies a part rides in the wake of, like the car in
@@ -401,6 +480,7 @@ Times measured on one core of an M4 laptop. Everything is written to `out/`.
 | `04_roof_bar.py` | `FlowStudy(extruded=...)`: a rectangular rack bar reshaped, as a 2D section | 42 s |
 | `05_dual_roof_box.py` | `DualStudy`: a 2 m foam pod on two bars with 50 kg of cargo, carved and lightened together | 129 s |
 | `06_parametric_hitch_box.py` | `ParametricStudy`: five dimensions of a lofted hitch box, tuned in free air and behind the car (`obstacles=`) | 200 s |
+| `07_hitch_frame.py` | `FrameStudy`: the steel tube frame of a hitch cargo platform, sized for bumps | 1 s |
 
 The roof box, for a taste of the flow side:
 
