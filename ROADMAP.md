@@ -58,6 +58,11 @@ In build order.
   are Timoshenko beams and can each have their own material, so a camper
   box's foam-cored walls carry load beside the steel; loads can sit at any
   point along a member.
+- **Plate mode.** `PlateStudy` lightens a flat plate as one layer of voxels
+  and cleans each station up for a plasma table -- holes and webs no smaller
+  than it can cut, a rim, a margin along the welds -- out as R12 DXF and SVG.
+  `FrameStudy.gusset()` sets cheek plates up at a joint, loaded from the
+  frame, and says how much of the joint's moment they take off its weld.
 - **Obstacles.** Fixed bodies a part rides in the wake of -- the car in front
   of a hitch box -- shelter it without being scored or moved, in the drag
   model, `FlowStudy` and `ParametricStudy`.
@@ -137,11 +142,11 @@ terracing it brings is the obvious problem.
 
 ## Next for frames
 
-- **Plate mode.** Lighten a gusset as a 2D plate a plasma table can cut: an
-  outline and a thickness in, through-holes out as DXF and SVG, with
-  minimum hole and web sizes and a margin along the welds. A one-voxel-thick
-  `LoadStudy` already gets most of the way; the frame study's end forces at
-  a joint are what to load the gusset with (`CaseResult.end_forces`).
+- **One plate over a short member.** On a short riser the plates at its two
+  corners meet; a plate over three members, held on one and loaded on the
+  other two, would size them as the single plate they are cut as.
+- **Plates in more than one load case,** and the free edge's buckling and the
+  welds' own size checked, not just the plate's stress.
 - **Legs and the parked case.** How a load splits between a hitch and legs
   depends on how the legs are set and how the car settles on its springs:
   supports with stiffness, and both bounds reported.
