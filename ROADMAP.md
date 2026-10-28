@@ -54,7 +54,10 @@ In build order.
   catalog -- and sweeps the tube of each group of members up or down until
   the lightest frame that keeps its safety factor. Reports stress, Euler
   buckling, deflection and the reactions at the supports, and flags fatigue
-  territory under 3.5x. Built for Caliper's hitch platform frame.
+  territory under 3.5x. Built for Caliper's hitch platform frame. Members
+  are Timoshenko beams and can each have their own material, so a camper
+  box's foam-cored walls carry load beside the steel; loads can sit at any
+  point along a member.
 - **Obstacles.** Fixed bodies a part rides in the wake of -- the car in front
   of a hitch box -- shelter it without being scored or moved, in the drag
   model, `FlowStudy` and `ParametricStudy`.

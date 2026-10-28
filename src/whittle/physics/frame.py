@@ -7,8 +7,9 @@ twisting of each member as a whole, and that is what a frame model does:
 each member is a beam along its centreline, with the area and stiffness of
 its cross-section, joined rigidly to the others at the nodes.
 
-Three-dimensional Euler-Bernoulli beams, twelve degrees of freedom each,
-solved directly -- a frame of a few dozen members is a few hundred unknowns
+Three-dimensional Timoshenko beams -- bending plus the shear that matters
+in a deep or foam-cored member, and barely at all in a tube -- twelve
+degrees of freedom each, solved directly -- a frame of a few dozen members is a few hundred unknowns
 and a millisecond. Stress is checked at the critical corner of each section,
 all along each member, and compression members against Euler buckling.
 
@@ -244,6 +245,9 @@ TUBES: dict[str, Section] = {
 #: Degrees of freedom at each node, in order.
 DOFS = ("ux", "uy", "uz", "rx", "ry", "rz")
 
+#: One load case for :meth:`FrameModel.solve`: nodal, distributed, and point loads.
+Loads = tuple[FloatArray, FloatArray, tuple[IntArray, FloatArray, FloatArray]]
+
 
 @dataclass
 class CaseResult:
@@ -293,9 +297,14 @@ class CaseResult:
 class FrameModel:
     """A frame's geometry and supports, solved for any choice of sections and any loads.
 
-    ``members`` pairs node indices. Each load case is a dict of ``nodal``
-    forces and moments, ``(nodes, 6)``, and ``distributed`` loads along
-    members in global directions, ``(members, 3)`` in N per mm.
+    ``members`` pairs node indices. Each load case is ``nodal`` forces and
+    moments, ``(nodes, 6)``; ``distributed`` loads along members in global
+    directions, ``(members, 3)`` in N per mm; and ``points``, forces at
+    points along members: member indices ``(k,)``, how far along each is as a
+    fraction from its first node ``(k,)``, and global forces ``(k, 3)``.
+
+    The material -- ``youngs_modulus``, ``shear_modulus`` and ``strength``,
+    in MPa -- is one value for every member, or one per member.
     """
 
     def __init__(
@@ -304,16 +313,20 @@ class FrameModel:
         members: IntArray,
         fixed: BoolArray,
         *,
-        youngs_modulus: float,
-        poisson_ratio: float,
-        strength: float,
+        youngs_modulus: float | FloatArray,
+        shear_modulus: float | FloatArray,
+        strength: float | FloatArray,
     ) -> None:
         self.nodes = np.asarray(nodes, dtype=np.float64)
         self.members = np.asarray(members, dtype=np.int64).reshape(-1, 2)
         self.fixed = np.asarray(fixed, dtype=bool).reshape(len(self.nodes), 6)
-        self.e = float(youngs_modulus)
-        self.g = self.e / (2.0 * (1.0 + poisson_ratio))
-        self.strength = float(strength)
+        m = len(self.members)
+        self.e, self.g, self.strength = (
+            np.broadcast_to(np.asarray(value, dtype=np.float64), (m,)).copy()
+            for value in (youngs_modulus, shear_modulus, strength)
+        )
+        if np.any(self.e <= 0) or np.any(self.g <= 0):
+            raise ValueError("every member needs a positive Young's modulus and shear modulus")
         span = self.nodes[self.members[:, 1]] - self.nodes[self.members[:, 0]]
         self.length = np.linalg.norm(span, axis=1)
         if np.any(self.length <= 0):
@@ -324,13 +337,14 @@ class FrameModel:
         self.free = ~self.fixed.ravel()
 
     def solve(
-        self, sections: Sequence[Section], cases: Mapping[str, tuple[FloatArray, FloatArray]]
+        self, sections: Sequence[Section], cases: Mapping[str, Loads]
     ) -> dict[str, CaseResult]:
         """Displacements, member forces, stresses and reactions in every case."""
         m = len(self.members)
         if len(sections) != m:
             raise ValueError(f"need one section per member: {m}, got {len(sections)}")
-        local = self._local_stiffness(sections)
+        phi_y, phi_z = self._shear(sections)
+        local = self._local_stiffness(sections, phi_y, phi_z)
         t = np.zeros((m, 12, 12))
         for block in range(4):
             t[:, 3 * block : 3 * block + 3, 3 * block : 3 * block + 3] = self.rotation
@@ -340,10 +354,9 @@ class FrameModel:
         cols = np.tile(self.dofs, (1, 12)).ravel()
         stiffness = sparse.csc_matrix((k_global.ravel(), (rows, cols)), shape=(n, n))
         free = np.flatnonzero(self.free)
-        if not len(free):
-            raise ValueError("every degree of freedom is held; there is nothing to solve")
         try:
-            factor = splu(stiffness[free][:, free].tocsc())
+            # Every node held is a frame that does not move: loads along members only.
+            factor = splu(stiffness[free][:, free].tocsc()) if len(free) else None
         except RuntimeError as error:
             raise ValueError(
                 "the frame can move without bending anything -- a node joined by no "
@@ -351,21 +364,31 @@ class FrameModel:
             ) from error
 
         results = {}
-        for name, (nodal, distributed) in cases.items():
+        for name, (nodal, distributed, (which, where, push)) in cases.items():
             q_local = np.einsum("mij,mj->mi", self.rotation, distributed)
             equivalent = _equivalent_loads(q_local, self.length)
+            which = np.asarray(which, dtype=np.int64)
+            where = np.asarray(where, dtype=np.float64) * self.length[which]
+            p_local = np.einsum("kij,kj->ki", self.rotation[which], np.reshape(push, (-1, 3)))
+            np.add.at(
+                equivalent,
+                which,
+                _point_loads(p_local, where, self.length[which], phi_y[which], phi_z[which]),
+            )
             loads = np.asarray(nodal, dtype=np.float64).reshape(n).copy()
             np.add.at(loads, self.dofs, np.einsum("mji,mj->mi", t, equivalent))
             d = np.zeros(n)
-            d[free] = factor.solve(loads[free])
+            if factor is not None:
+                d[free] = factor.solve(loads[free])
             if not np.all(np.isfinite(d)):
                 raise ValueError("the frame's stiffness is singular: check its supports")
             reactions = stiffness @ d - loads
             reactions[free] = 0.0
             ends = np.einsum("mij,mjk,mk->mi", local, t, d[self.dofs]) - equivalent
-            stress, compression = _along(ends, q_local, self.length, sections)
-            i_min = np.array([min(s.iy, s.iz) for s in sections])
-            buckling = np.pi**2 * self.e * i_min / self.length**2
+            stress, compression = _along(
+                ends, q_local, self.length, sections, (which, where, p_local)
+            )
+            buckling = self._buckling(sections)
             with np.errstate(divide="ignore"):
                 safety = np.minimum(
                     self.strength / np.maximum(stress, 1e-12),
@@ -384,7 +407,27 @@ class FrameModel:
             )
         return results
 
-    def _local_stiffness(self, sections: Sequence[Section]) -> FloatArray:
+    def _shear(self, sections: Sequence[Section]) -> tuple[FloatArray, FloatArray]:
+        """How much shear adds to bending deflection, per member -- Timoshenko's phi --
+        for bending in the local xy plane (about z) and in xz (about y)."""
+        iy, iz, shear_y, shear_z = _properties(sections, "iy", "iz", "shear_y", "shear_z")
+        scale = 12.0 * self.e / (self.g * self.length**2)
+        return scale * iz / shear_y, scale * iy / shear_z
+
+    def _buckling(self, sections: Sequence[Section]) -> FloatArray:
+        """Euler's buckling load, eased by shear, each way; the lesser of the two."""
+        iy, iz, shear_y, shear_z = _properties(sections, "iy", "iz", "shear_y", "shear_z")
+        euler = np.pi**2 * self.e / self.length**2
+        about_y, about_z = euler * iy, euler * iz
+        result: FloatArray = np.minimum(
+            about_y / (1.0 + about_y / (self.g * shear_z)),
+            about_z / (1.0 + about_z / (self.g * shear_y)),
+        )
+        return result
+
+    def _local_stiffness(
+        self, sections: Sequence[Section], phi_y: FloatArray, phi_z: FloatArray
+    ) -> FloatArray:
         m = len(sections)
         e, g, length = self.e, self.g, self.length
         area = np.array([s.area for s in sections])
@@ -398,11 +441,12 @@ class FrameModel:
             k[:, a, a] = k[:, b, b] = value
             k[:, a, b] = k[:, b, a] = -value
         # Bending in the xy plane (uy, rz) about z, and in xz (uz, ry) about y.
-        for inertia, v, r, sign in ((iz, 1, 5, 1.0), (iy, 2, 4, -1.0)):
-            a = 12.0 * e * inertia / length**3
-            b = sign * 6.0 * e * inertia / length**2
-            c = 4.0 * e * inertia / length
-            d = 2.0 * e * inertia / length
+        for inertia, phi, v, r, sign in ((iz, phi_y, 1, 5, 1.0), (iy, phi_z, 2, 4, -1.0)):
+            scale = e * inertia / (1.0 + phi)
+            a = 12.0 * scale / length**3
+            b = sign * 6.0 * scale / length**2
+            c = (4.0 + phi) * scale / length
+            d = (2.0 - phi) * scale / length
             entries = {
                 (v, v): a, (v, r): b, (v, v + 6): -a, (v, r + 6): b,
                 (r, r): c, (r, v + 6): -b, (r, r + 6): d,
@@ -413,6 +457,11 @@ class FrameModel:
                 k[:, p, q] = value
                 k[:, q, p] = value
         return k
+
+
+def _properties(sections: Sequence[Section], *keys: str) -> list[FloatArray]:
+    """One array per property named, across the members' sections."""
+    return [np.array([getattr(s, key) for s in sections]) for key in keys]
 
 
 def _axes(direction: FloatArray) -> FloatArray:
@@ -442,11 +491,34 @@ def _equivalent_loads(q: FloatArray, length: FloatArray) -> FloatArray:
     return f
 
 
+def _point_loads(
+    p: FloatArray, a: FloatArray, length: FloatArray, phi_y: FloatArray, phi_z: FloatArray
+) -> FloatArray:
+    """The nodal loads equivalent to a force ``a`` mm along a member, in local axes.
+
+    A fixed-ended Timoshenko beam's end forces: with no shear (phi 0) the
+    familiar Pb^2(3a+b)/L^3 and Pab^2/L^2; the more shear, the more each end
+    takes the share a simple lever would give it.
+    """
+    b = length - a
+    f = np.zeros((len(p), 12))
+    f[:, 0] = p[:, 0] * b / length
+    f[:, 6] = p[:, 0] * a / length
+    for phi, axis, spin, sign in ((phi_y, 1, 5, 1.0), (phi_z, 2, 4, -1.0)):
+        share = 1.0 / (length**2 * (1.0 + phi))
+        f[:, axis] = p[:, axis] * b * (b * (3.0 * a + b) + phi * length**2) * share / length
+        f[:, axis + 6] = p[:, axis] * a * (a * (a + 3.0 * b) + phi * length**2) * share / length
+        f[:, spin] = sign * p[:, axis] * a * b * (b + phi * length / 2.0) * share
+        f[:, spin + 6] = -sign * p[:, axis] * a * b * (a + phi * length / 2.0) * share
+    return f
+
+
 def _along(
     ends: FloatArray,
     q: FloatArray,
     length: FloatArray,
     sections: Sequence[Section],
+    points: tuple[IntArray, FloatArray, FloatArray],
     samples: int = 11,
 ) -> tuple[FloatArray, FloatArray]:
     """Worst von Mises stress and worst compression along each member.
@@ -455,8 +527,25 @@ def _along(
     to the cut are what the rest of it holds. Stresses from axial force and
     bending in both directions add at the worst corner; shear from torsion
     and transverse force adds too -- conservative, which is the point.
+
+    A force at a point along a member puts the most bending under itself, so
+    each member is also cut either side of every one of its ``points``
+    (member indices, mm along, local forces).
     """
-    s = np.linspace(0.0, 1.0, samples)[None, :, None] * length[:, None, None]
+    which, where, push = points
+    m = len(length)
+    count = np.bincount(which, minlength=m)
+    extra = 2 * int(count.max()) if len(which) else 0
+    s = np.zeros((m, samples + extra))
+    s[:, :samples] = np.linspace(0.0, 1.0, samples)[None, :] * length[:, None]
+    # Each point's own two slots: its rank among its member's points.
+    order = np.argsort(which, kind="stable")
+    rank = np.empty(len(which), dtype=np.int64)
+    rank[order] = np.arange(len(which)) - np.concatenate([[0], np.cumsum(count)])[which[order]]
+    slot = samples + 2 * rank
+    s[which, slot] = where
+    s[which, slot + 1] = np.minimum(where * (1.0 + 1e-9) + 1e-9, length[which])
+    s = s[:, :, None]
     near_force, near_moment = ends[:, None, 0:3], ends[:, None, 3:6]
     force = -near_force - q[:, None, :] * s
     ex = np.array([1.0, 0.0, 0.0])
@@ -464,6 +553,13 @@ def _along(
         -near_moment
         + s * np.cross(ex, near_force)
         + (s**2 / 2.0) * np.cross(ex, q[:, None, :])
+    )
+    # Past a point load, the cut also holds it.
+    lever = s[which, :, 0] - where[:, None]
+    past = lever > 0.0
+    np.add.at(force, which, np.where(past[:, :, None], -push[:, None, :], 0.0))
+    np.add.at(
+        moment, which, (np.where(past, lever, 0.0))[:, :, None] * np.cross(ex, push)[:, None, :]
     )
     area = np.array([sec.area for sec in sections])[:, None]
     sy = np.array([sec.sy for sec in sections])[:, None]

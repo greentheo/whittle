@@ -17,13 +17,16 @@
 Millimetres and newtons. Members are tubes from :data:`TUBES`, by key, or any
 :class:`~whittle.physics.frame.Section`. ``group`` ties members that are cut
 from the same stock -- both ladder rails, all the cross members -- so a sweep
-sizes them together.
+sizes them together. A member can be made of something other than the
+frame's own material -- a foam-cored wall carrying load beside the steel --
+with a section and material of its own.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from itertools import combinations
 from typing import Any
 
 import numpy as np
@@ -35,6 +38,7 @@ from .physics.frame import (
     TUBES,
     CaseResult,
     FrameModel,
+    Loads,
     Section,
     _axes,
     section,
@@ -52,12 +56,23 @@ _FIXES = {"all": DOFS, "pin": DOFS[:3]}
 _BOX = ((0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7), (3, 2, 1, 0), (4, 5, 6, 7))
 
 
+@dataclass(frozen=True)
+class _Stuff:
+    """What a member is made of, as a frame needs it: moduli and strength in MPa, g/cm^3."""
+
+    youngs_modulus: float
+    shear_modulus: float
+    strength: float
+    density: float
+
+
 @dataclass
 class _Case:
     factor: float = 1.0
     self_weight: bool = True
     nodal: list[tuple[int, Vector3, Vector3]] = field(default_factory=list)
     distributed: list[tuple[int, FloatArray]] = field(default_factory=list)
+    points: list[tuple[int, float, Vector3]] = field(default_factory=list)
 
 
 @dataclass
@@ -91,11 +106,14 @@ class FrameStudy:
     ) -> None:
         self.material = _material(material)
         self.fatigue_safety = float(fatigue_safety)
+        self.stuff = _stuff(self.material)
         self.nodes: list[Vector3] = []
         self.names: dict[str, int] = {}
         self.members: list[tuple[int, int]] = []
         self.sections: list[Section] = []
         self.groups: list[str | None] = []
+        #: Per member, what it is made of if not the frame's own material.
+        self.materials: list[_Stuff | None] = []
         self.fixed: dict[int, set[str]] = {}
         self.cases: dict[str, _Case] = {}
 
@@ -113,12 +131,28 @@ class FrameStudy:
         return index
 
     def member(
-        self, a: int | str, b: int | str, section: str | Section, *, group: str | None = None
+        self,
+        a: int | str,
+        b: int | str,
+        section: str | Section | Mapping[str, Any],
+        *,
+        group: str | None = None,
+        material: str | Material | Mapping[str, Any] | None = None,
     ) -> int:
-        """Join two nodes with a member of this section; returns its index."""
+        """Join two nodes with a member of this section; returns its index.
+
+        ``section`` is a tube key, a :class:`Section`, or a section's numbers
+        as a dict (``area``, ``iy``, ``iz``, ``j``, ``sy``, ``sz``, ``wt``,
+        ``shear_y``, ``shear_z``; ``mass_area``, ``width`` and ``height`` if
+        they matter). ``material`` is a name, a :class:`Material`, or a dict
+        of ``youngs_modulus``, ``strength``, ``density`` and
+        ``shear_modulus`` or ``poisson_ratio`` -- for a composite, its
+        section transformed to one material and that material's strength.
+        """
         self.members.append((self._node(a), self._node(b)))
         self.sections.append(_section(section))
         self.groups.append(group)
+        self.materials.append(None if material is None else _stuff(material))
         return len(self.members) - 1
 
     def support(self, node: int | str, *, fix: str | Sequence[str] = "all") -> FrameStudy:
@@ -140,6 +174,7 @@ class FrameStudy:
             self_weight=self_weight,
             nodal=[] if existing is None else existing.nodal,
             distributed=[] if existing is None else existing.distributed,
+            points=[] if existing is None else existing.points,
         )
         return self
 
@@ -177,6 +212,19 @@ class FrameStudy:
         self._case(case).distributed.append((member, q))
         return self
 
+    def point(
+        self, member: int, at: float, *, force: Sequence[float], case: str = "default"
+    ) -> FrameStudy:
+        """A force (N, global directions) at a point along a member: ``at`` is how far
+        along it is, from 0 at its first node to 1 at its second."""
+        if not 0 <= member < len(self.members):
+            raise ValueError(f"no member {member}")
+        if not 0.0 <= at <= 1.0:
+            raise ValueError(f"at= runs from 0 at a member's first node to 1, got {at}")
+        f = (float(force[0]), float(force[1]), float(force[2]))
+        self._case(case).points.append((member, float(at), f))
+        return self
+
     @classmethod
     def from_dict(cls, spec: Mapping[str, Any]) -> FrameStudy:
         """A frame from plain data, as another program would hand it over.
@@ -185,11 +233,14 @@ class FrameStudy:
 
             {"material": "steel",
              "nodes": {"mouth": [76.2, 0, 228.6], ...},     # or a list: index = id
-             "members": [{"a": "mouth", "b": "jog", "section": "2x2x1/4", "group": "shank"}],
+             "members": [{"a": "mouth", "b": "jog", "section": "2x2x1/4", "group": "shank"},
+                         {"a": 3, "b": 4, "section": {"area": ..., "iy": ...},
+                          "material": {"youngs_modulus": ..., "shear_modulus": ...}}],
              "supports": [{"node": "mouth", "fix": ["ux", "uy", "uz", "rx"]}],
              "cases": {"driving": {"factor": 2.5, "self_weight": true}},
              "loads": [{"case": "driving", "node": "tip", "force": [0, 0, -445]},
-                       {"case": "driving", "member": 7, "total": [0, 0, -222]}]}
+                       {"case": "driving", "member": 7, "total": [0, 0, -222]},
+                       {"case": "driving", "member": 9, "at": 0.4, "force": [0, 0, -90]}]}
         """
         study = cls(spec.get("material", "steel"))
         nodes = spec["nodes"]
@@ -200,7 +251,13 @@ class FrameStudy:
             for xyz in nodes:
                 study.node(xyz)
         for item in spec["members"]:
-            study.member(item["a"], item["b"], item["section"], group=item.get("group"))
+            study.member(
+                item["a"],
+                item["b"],
+                item["section"],
+                group=item.get("group"),
+                material=item.get("material"),
+            )
         for item in spec.get("supports", []):
             study.support(item["node"], fix=item.get("fix", "all"))
         for name, case in spec.get("cases", {}).items():
@@ -209,7 +266,11 @@ class FrameStudy:
             )
         for item in spec.get("loads", []):
             case_name = item.get("case", "default")
-            if "member" in item:
+            if "member" in item and "at" in item:
+                study.point(
+                    int(item["member"]), float(item["at"]), force=item["force"], case=case_name
+                )
+            elif "member" in item:
                 study.spread(
                     int(item["member"]),
                     total=item.get("total"),
@@ -232,10 +293,10 @@ class FrameStudy:
         chosen = list(self.sections if sections is None else sections)
         model = self._model()
         cases = model.solve(chosen, self._loads(chosen, model))
-        density = self.material.density
-        mass = float(sum(s.mass_per_mm(density) * length for s, length in zip(
-            chosen, model.length, strict=True
-        )))
+        mass = float(sum(
+            s.mass_per_mm(self._made_of(i).density) * length
+            for i, (s, length) in enumerate(zip(chosen, model.length, strict=True))
+        ))  # fmt: skip
         worst = min(
             ((name, int(np.argmin(c.safety)), float(c.safety.min())) for name, c in cases.items()),
             key=lambda item: item[2],
@@ -278,19 +339,29 @@ class FrameStudy:
         the most safety per kilogram, until it does not fall short. The rest
         take material away where it costs the least safety per kilogram,
         until any lighter step would fall short. Each station is one size
-        step from the last, and its ``design`` names each group's tube.
+        step from the last -- or, where no one step helps, two groups
+        stepped together or one group jumped further -- and its ``design``
+        names each group's tube.
 
         ``groups`` maps a group to the tubes it may be -- a 2" hitch shank
         only to 2x2 sizes, say. Groups not named keep their tubes, and
-        without ``groups`` every group may be any tube in :data:`TUBES`.
+        without ``groups`` every group of tubes from :data:`TUBES` in the
+        frame's own material may be any of them; the rest stay as they are.
         """
         names = sorted({g for g in self.groups if g is not None})
         if groups is None:
-            groups = {name: list(TUBES) for name in names}
+            groups = {
+                name: list(TUBES)
+                for name in names
+                if all(
+                    self.sections[i].name in TUBES and self.materials[i] is None
+                    for i, g in enumerate(self.groups)
+                    if g == name
+                )
+            }
         unknown = set(groups) - set(names)
         if unknown:
             raise ValueError(f"no members are in group(s) {sorted(unknown)}")
-        density = self.material.density
         ladders: dict[str, list[Section]] = {}
         current: dict[str, int] = {}
         for name, options in groups.items():
@@ -301,6 +372,7 @@ class FrameStudy:
                 raise ValueError(f"group {name!r} mixes sections {sorted(drawn)}; give it one")
             start = self.sections[members[0]]
             stock.setdefault(start.name, start)
+            density = self._made_of(members[0]).density
             ladders[name] = _ladder(list(stock.values()), start, density)
             current[name] = [s.name for s in ladders[name]].index(start.name)
 
@@ -331,6 +403,43 @@ class FrameStudy:
                 if 0 <= choice[name] + step < len(ladder)
             ]
 
+        def further(choice: dict[str, int]) -> list[dict[str, int]]:
+            """When no one step helps: two groups stepped together, or one jumped further.
+
+            A heavier X fixes the X but loads the shank past its limit, and
+            only both at once get anywhere; or the next tube up is no better
+            where it counts, and only the one after it is.
+            """
+            jumps = [
+                {**choice, name: index}
+                for name, ladder in ladders.items()
+                for index in range(len(ladder))
+                if abs(index - choice[name]) > 1
+            ]
+            pairs = [
+                {**choice, a: choice[a] + sa, b: choice[b] + sb}
+                for a, b in combinations(ladders, 2)
+                for sa in (-1, 1)
+                for sb in (-1, 1)
+                if 0 <= choice[a] + sa < len(ladders[a]) and 0 <= choice[b] + sb < len(ladders[b])
+            ]
+            return pairs + jumps
+
+        def strengthen(
+            choices: list[dict[str, int]], here: FrameResult
+        ) -> tuple[dict[str, int], FrameResult] | None:
+            found = []
+            for choice in choices:
+                result = self.analyze(design(choice))
+                gain, cost = short(here) - short(result), result.mass - here.mass
+                if gain > 1e-9:
+                    rank = (cost <= 0, gain if cost <= 0 else gain / cost)
+                    found.append((rank, choice, result))
+            if not found:
+                return None
+            _, choice, result = max(found, key=lambda step: step[0])
+            return choice, result
+
         path = [(dict(current), self.analyze(design(current)))]
         # Short of the target: the move that closes the most of the shortfall
         # per kilogram -- summed over every member short of it, not just the
@@ -338,18 +447,11 @@ class FrameStudy:
         # lighter tube that closes some -- by easing the load the rest of the
         # frame carries -- costs nothing, and comes first.
         while not fits(path[-1][1]):
-            here = path[-1][1]
-            found = []
-            for choice in moves(path[-1][0], up=True):
-                result = self.analyze(design(choice))
-                gain, cost = short(here) - short(result), result.mass - here.mass
-                if gain > 1e-9:
-                    rank = (cost <= 0, gain if cost <= 0 else gain / cost)
-                    found.append((rank, choice, result))
-            if not found:
+            choice, here = path[-1]
+            step = strengthen(moves(choice, up=True), here) or strengthen(further(choice), here)
+            if step is None:
                 break
-            _, choice, result = max(found, key=lambda step: step[0])
-            path.append((choice, result))
+            path.append(step)
         # On target: the lighter tube that costs the least safety per kilogram saved.
         while fits(path[-1][1]):
             here = path[-1][1]
@@ -424,6 +526,9 @@ class FrameStudy:
             raise ValueError(f"no node {ref}")
         return int(ref)
 
+    def _made_of(self, member: int) -> _Stuff:
+        return self.materials[member] or self.stuff
+
     def _case(self, name: str) -> _Case:
         if name not in self.cases:
             self.cases[name] = _Case()
@@ -442,20 +547,23 @@ class FrameStudy:
         for node, names in self.fixed.items():
             for name in names:
                 fixed[node, DOFS.index(name)] = True
+        made_of = [self._made_of(i) for i in range(len(self.members))]
         return FrameModel(
             np.array(self.nodes),
             np.array(self.members),
             fixed,
-            youngs_modulus=self.material.youngs_modulus,
-            poisson_ratio=self.material.poisson_ratio,
-            strength=self.material.strength,
+            youngs_modulus=np.array([m.youngs_modulus for m in made_of]),
+            shear_modulus=np.array([m.shear_modulus for m in made_of]),
+            strength=np.array([m.strength for m in made_of]),
         )
 
     def _loads(
         self, sections: Sequence[Section], model: FrameModel
-    ) -> dict[str, tuple[FloatArray, FloatArray]]:
+    ) -> dict[str, Loads]:
         cases = self.cases or {"default": _Case()}
-        weight = np.array([s.mass_per_mm(self.material.density) * GRAVITY for s in sections])
+        weight = np.array([
+            s.mass_per_mm(self._made_of(i).density) * GRAVITY for i, s in enumerate(sections)
+        ])  # fmt: skip
         loads = {}
         for name, case in cases.items():
             nodal = np.zeros((len(self.nodes), 6))
@@ -467,7 +575,13 @@ class FrameStudy:
                 spread[member] += q
             if case.self_weight:
                 spread[:, 2] -= weight
-            loads[name] = (nodal * case.factor, spread * case.factor)
+            points = (
+                np.array([member for member, _, _ in case.points], dtype=np.int64),
+                np.array([at for _, at, _ in case.points], dtype=np.float64),
+                np.array([f for _, _, f in case.points], dtype=np.float64).reshape(-1, 3)
+                * case.factor,
+            )
+            loads[name] = (nodal * case.factor, spread * case.factor, points)
         return loads
 
 
@@ -500,9 +614,48 @@ def _ladder(options: list[Section], drawn: Section, density: float) -> list[Sect
 _STRENGTHS = ("sy", "sz", "iy", "iz", "j")
 
 
-def _section(spec: str | Section) -> Section:
+def _stuff(spec: str | Material | Mapping[str, Any]) -> _Stuff:
+    if not isinstance(spec, Mapping):
+        m = material(spec)
+        return _Stuff(
+            m.youngs_modulus,
+            m.youngs_modulus / (2.0 * (1.0 + m.poisson_ratio)),
+            m.strength,
+            m.density,
+        )
+    e = float(spec["youngs_modulus"])
+    if "shear_modulus" in spec:
+        g = float(spec["shear_modulus"])
+    else:
+        g = e / (2.0 * (1.0 + float(spec.get("poisson_ratio", 0.3))))
+    stuff = _Stuff(e, g, float(spec["strength"]), float(spec["density"]))
+    if min(stuff.youngs_modulus, stuff.shear_modulus, stuff.strength) <= 0:
+        raise ValueError(f"a material needs positive moduli and strength, got {dict(spec)}")
+    return stuff
+
+
+_PROPERTIES = ("area", "iy", "iz", "j", "sy", "sz", "wt", "shear_y", "shear_z")
+
+
+def _section(spec: str | Section | Mapping[str, Any]) -> Section:
     if isinstance(spec, Section):
         return spec
+    if isinstance(spec, Mapping):
+        missing = [key for key in _PROPERTIES if key not in spec]
+        if missing:
+            raise ValueError(f"a section given as numbers needs {missing} too")
+        values = {key: float(spec[key]) for key in _PROPERTIES}
+        if min(values.values()) <= 0:
+            raise ValueError(f"a section's numbers must all be positive, got {values}")
+        side = float(np.sqrt(values["area"]))
+        return Section(
+            name=str(spec.get("name", "custom")),
+            width=float(spec.get("width", side)),
+            height=float(spec.get("height", side)),
+            wall=None,
+            mass_area=float(spec.get("mass_area", values["area"])),
+            **values,
+        )
     return TUBES[spec] if spec in TUBES else section(spec)
 
 

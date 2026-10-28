@@ -288,6 +288,7 @@ frame.support(mouth, fix=("ux", "uy", "uz", "rx"))    # a receiver: a socket and
 frame.support(inner, fix=("uy", "uz"))
 frame.case("driving", factor=2.5)                     # bumps, the frame's own weight included
 frame.spread(rail, total=(0, 0, -222), case="driving")
+frame.point(cross, 0.4, force=(0, 0, -90), case="driving")  # or at a point along it
 result = frame.analyze()                              # stress, safety, deflection per member
 sweep = frame.sweep(groups={"shank": ["2x2x1/4", "2x2x5/16", "2x2xsolid"], ...})
 sweep[-1].design                                      # {"shank": "2x2xsolid", ...}
@@ -302,8 +303,15 @@ so a sweep sizes them together; it steps each group up or down its list of
 tubes one size at a time -- first adding material where it closes the most
 of the shortfall per kilogram if the frame as drawn falls short, then taking
 it away where it costs the least -- and each station is one size step from
-the last. `FrameStudy.from_dict()` takes the whole frame as plain data, as
+the last. Where no one step helps -- a heavier arm fixes the arm but
+overloads the shank it hangs from -- it steps two groups together, or jumps
+one further. `FrameStudy.from_dict()` takes the whole frame as plain data, as
 another program would hand it over.
+
+A member can be something other than tube: a foam-cored wall carrying load
+beside the steel, say, given as its section's numbers and a material of its
+own (`material=`, or `"material"` in the dict). A sweep leaves those members
+as they are unless it is told what they may be.
 
 `examples/07_hitch_frame.py` is the steel frame of a hitch cargo platform:
 a shank in a 2" receiver, a 6" riser, an upper shank running back 50", and a
@@ -340,15 +348,21 @@ honest gaps are in the inputs, not the solver:
 - **Resolution sets the finest member.** About 48 voxels along the longest side
   is the default; members come out at least two to three voxels thick.
 
-**Frames -- validated, with one big blind spot.** Deflection and twist
-match beam theory exactly and stress to within 1%, and tube properties and
-weights match the AISC tables. What a frame model cannot see is the weld:
-joints are perfectly rigid and stress is the nominal stress in the tube,
-where a real weld concentrates it at its toe. Welded steel under road vibration fails there,
-by fatigue, at stresses well below yield -- which is why a frame study flags
-anything under 3.5x and why the margins it asks for look generous.
-Compression members are checked against Euler buckling with an effective
-length equal to their own, which flatters a column free at one end.
+**Frames -- validated, with one big blind spot.** Members are Timoshenko
+beams, so shear counts where it matters -- a deep, foam-cored wall bends in
+shear about as much as in bending -- and barely at all in a tube.
+Deflection and twist match beam theory exactly and stress to within 1%, and
+tube properties and weights match the AISC tables. What a frame model
+cannot see is the weld: joints are perfectly rigid and stress is the
+nominal stress in the tube, where a real weld concentrates it at its toe.
+Welded steel under road vibration fails there, by fatigue, at stresses well
+below yield -- which is why a frame study flags anything under 3.5x and why
+the margins it asks for look generous. Compression members are checked
+against Euler buckling, eased by shear, with an effective length equal to
+their own, which flatters a column free at one end. A sandwich wall given
+as a section transformed to its skin is checked against the skin's
+strength alone -- not core shear, skin wrinkling or the fixings that hold
+it on, which are how sandwich panels usually fail.
 
 **Aero -- an engineering estimate, not CFD.** `DragModel` scores a mesh in
 about a millisecond from the few facts that decide most of the drag of a
@@ -403,7 +417,7 @@ can replace scipy's engine without touching anything else.
 
 ## Status
 
-**Works, tested (176 tests, ~58 s), runs today**
+**Works, tested (182 tests, ~58 s), runs today**
 
 - `FrameStudy` -- size the tubes of a welded frame: stress, buckling,
   deflection and what the supports hold, from a catalog of real tube
