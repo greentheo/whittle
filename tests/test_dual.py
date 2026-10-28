@@ -89,6 +89,25 @@ def test_the_front_holds_only_designs_nothing_beats(pod: tuple[DualStudy, DualSw
     assert "carved" in sweep.table()
 
 
+def test_lightened_meshes_keep_the_part_outside() -> None:
+    # 130 x 67 mm on 12.5 mm voxels: neither is a whole number of them.
+    box = shapes.box((300.0, 130.0, 67.0), center=(0.0, 0.0, 33.5), cell=10.0)
+    study = DualStudy(
+        box, flow=(-1.0, 0.0, 0.0), material="xps", resolution=16, structure_resolution=24
+    )
+    study.support(box=((50.0, -70.0, -5.0), (70.0, 70.0, 8.0)))
+    study.support(box=((-70.0, -70.0, -5.0), (-50.0, 70.0, 8.0)))
+    sweep = study.sweep(aero_stations=2, weight_stations=2, effort=0.1)
+    first = sweep.rows[0].stations[0]
+    lo, hi = box.bounds
+    tolerance = 0.2 * study.grid.spacing
+    assert np.all(np.abs(first.mesh.bounds[0] - lo) < tolerance)
+    assert np.all(np.abs(first.mesh.bounds[1] - hi) < tolerance)
+    assert first.metrics["mass_g"] == pytest.approx(
+        box.volume / 1000.0 * study.material.density, rel=0.03
+    )
+
+
 def test_wind_forces_keep_the_total() -> None:
     box = shapes.box((300.0, 120.0, 60.0), cell=10.0)
     grid = Grid.around(box, resolution=30)

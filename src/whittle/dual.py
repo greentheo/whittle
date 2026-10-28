@@ -384,6 +384,7 @@ class DualStudy:
     ) -> DualRow:
         grid = self.grid
         occupancy = grid.voxelize(shape)
+        coverage = grid.coverage(shape)
         void = np.zeros(grid.shape, dtype=bool)
         for box, _ in self.cargo_boxes:
             void |= grid.box(*box)
@@ -445,16 +446,18 @@ class DualStudy:
         stations = []
         for s in run.stations:
             result = s.result
+            voxels = float(grid.share(s.solid, occupancy, coverage).sum())
             metrics = {
                 **aero,
-                "mass_g": float(s.solid.sum()) * voxel_cm3 * self.material.density,
+                "mass_g": voxels * voxel_cm3 * self.material.density,
                 "stiffness": base / result.compliance,
                 "deflection_mm": result.max_displacement,
                 "peak_stress_mpa": result.peak_stress,
                 "safety_factor": self.material.strength / result.peak_stress,
             }
+            field = grid.fitted(s.solid, occupancy, coverage)
             stations.append(
-                Station(s.removed, metrics, _mesher(grid, s.solid), design=s.solid, analysis=result)
+                Station(s.removed, metrics, _mesher(grid, field), design=s.solid, analysis=result)
             )
         return DualRow(1.0 - shape.volume / volume, 0.0, shape, genome, report, stations, run.note)
 
@@ -469,5 +472,6 @@ def _material(spec: str | Material) -> Material:
     return material(spec)
 
 
-def _mesher(grid: Grid, solid: BoolArray) -> Callable[[], Mesh]:
-    return lambda: grid.mesh(solid, relax=8)
+def _mesher(grid: Grid, field: FloatArray) -> Callable[[], Mesh]:
+    # The field from Grid.fitted is already as smooth as it should be.
+    return lambda: grid.mesh(field, smooth=0.0, relax=8)

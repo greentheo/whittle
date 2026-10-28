@@ -33,7 +33,10 @@ bluff body at high Reynolds number.
 5. **What is behind something is sheltered.** A windward face with another
    part of the body upstream of it, along the flow, sits in a wake and is
    pushed on far less. A face is judged sheltered when a leeward face lies
-   upstream of it in the same column along the flow.
+   upstream of it in the same column along the flow. The something can also
+   be an *obstacle* that is not part of the design -- the car a hitch box
+   rides behind -- which shelters what is downstream of it but is never
+   scored itself.
 
 Calibrated against textbook high-Reynolds-number drag coefficients, it gives
 roughly 1.3 for a flat plate face-on, 1.1 for a cube, 0.2 for a sphere above
@@ -51,6 +54,7 @@ step is a real CFD run on the two or three designs this one picked.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -58,7 +62,7 @@ from scipy import sparse
 from scipy.sparse import csgraph
 from scipy.special import expit
 
-from ..types import FloatArray, IntArray, Mesh, Vector3
+from ..types import BoolArray, FloatArray, IntArray, Mesh, Vector3
 
 
 @dataclass(frozen=True)
@@ -118,6 +122,14 @@ class DragModel:
     endless, like a short length of roof bar standing in for the whole bar.
     ``ends`` then names the axis the slice was cut across, and faces facing
     along it -- the cut ends, which the real bar does not have -- are ignored.
+
+    ``obstacles`` are fixed bodies in the same frame that the scored mesh sits
+    in the wake of, like the car behind which a hitch box rides. A windward
+    face of the mesh downstream of an obstacle's silhouette gets no pressure
+    and no friction, but still counts towards the mesh's own frontal area, so
+    ``cd`` stays a coefficient on the part's own size. The wake is taken as the
+    obstacle's full silhouette however far back it reaches -- right for a box a
+    foot or two behind a bumper, generous for a trailer ten metres back.
     """
 
     def __init__(
@@ -130,6 +142,7 @@ class DragModel:
         skin_friction: float = 0.0045,
         aspect: float | None = None,
         ends: int | None = None,
+        obstacles: Sequence[Mesh] = (),
     ) -> None:
         direction = np.asarray(flow, dtype=np.float64)
         length = float(np.linalg.norm(direction))
@@ -156,6 +169,7 @@ class DragModel:
         self._degree: FloatArray = np.zeros(0, dtype=np.float64)
         self._body: IntArray = np.zeros(0, dtype=np.int64)
         self._n_bodies = 0
+        self._shadow = _Shadow(obstacles, self.flow, self._plane) if obstacles else None
 
     def __call__(self, mesh: Mesh) -> DragReport:
         n_faces = len(mesh.faces)
@@ -177,14 +191,19 @@ class DragModel:
         leeward = ~windward
         depth = centroid @ self.flow
         sheltered = windward & self._sheltered(centroid, depth, s, area)
-        exposed = windward & ~sheltered
+        # What the mesh presents to the flow, whether or not an obstacle's wake
+        # then hides it: that is its own size, which wake strength depends on.
+        seen = windward & ~sheltered
+        exposed = seen.copy()
+        if self._shadow is not None:
+            exposed &= ~self._shadow.hides(centroid, depth)
 
         # Wake strength and what counts as "curved" both depend on the size of
         # the body a face belongs to -- not of the whole mesh, which may hold
         # several separate bodies, like the bars of a roof rack.
         _, _, _, body, n_bodies = self._topology(mesh.faces)
         frontal_each = np.bincount(
-            body, weights=np.where(exposed, area * s, 0.0), minlength=n_bodies
+            body, weights=np.where(seen, area * s, 0.0), minlength=n_bodies
         )
         frontal = float(frontal_each.sum())
         if frontal <= 0:
@@ -193,7 +212,7 @@ class DragModel:
         back = np.full(n_bodies, -np.inf)
         np.minimum.at(front, body, depth)
         np.maximum.at(back, body, depth)
-        measured = self._aspect(mesh, np.where(exposed, s, 0.0), body, n_bodies)
+        measured = self._aspect(mesh, np.where(seen, s, 0.0), body, n_bodies)
         # The silhouette's short side: the width of a bar, the diameter of a disc.
         thickness = np.sqrt(np.maximum(frontal_each, 1e-300) / measured)
         aspect = measured if self.aspect is None else np.full(n_bodies, self.aspect)
@@ -389,6 +408,72 @@ class DragModel:
         np.minimum.at(nearest, key[blockers], depth[blockers])
         sheltered: np.ndarray = depth > nearest[key] + cell
         return sheltered
+
+
+class _Shadow:
+    """Where the wake behind some fixed obstacles starts, mapped across the flow.
+
+    The obstacles' leeward faces are drawn onto a grid in the plane normal to
+    the flow, each grid point keeping the most upstream depth at which an
+    obstacle's back hangs over it. Drawn rather than binned by face, because
+    an obstacle is often a few big triangles -- a slab standing in for a car
+    -- whose centres alone would mark a handful of columns out of thousands.
+    """
+
+    def __init__(
+        self, obstacles: Sequence[Mesh], flow: FloatArray, plane: FloatArray, *, size: int = 256
+    ) -> None:
+        corners, depths = [], []
+        for mesh in obstacles:
+            a, b, c = (mesh.vertices[mesh.faces[:, i]] for i in range(3))
+            normal = np.cross(b - a, c - a)
+            leeward = normal @ flow > 0.05 * np.linalg.norm(normal, axis=1)
+            faces = mesh.faces[leeward]
+            corners.append((mesh.vertices @ plane.T)[faces])
+            depths.append((mesh.vertices @ flow)[faces].min(axis=1))
+        uv = np.concatenate(corners) if corners else np.zeros((0, 3, 2))
+        depth = np.concatenate(depths) if depths else np.zeros(0)
+        if not len(uv):
+            raise ValueError("the obstacles have no faces turned away from the flow")
+        self.plane = plane
+        self.origin = uv.reshape(-1, 2).min(axis=0)
+        extent = uv.reshape(-1, 2).max(axis=0) - self.origin
+        self.pixel = max(float(extent.max()) / size, 1e-12)
+        shape = (np.ceil(extent / self.pixel).astype(np.int64) + 1).tolist()
+        self.depth: FloatArray = np.full(shape, np.inf)
+        for triangle, d in zip(uv, depth, strict=True):
+            self._draw((triangle - self.origin) / self.pixel, float(d))
+
+    def _draw(self, t: FloatArray, depth: float) -> None:
+        lo = np.maximum(np.floor(t.min(axis=0)).astype(np.int64), 0)
+        hi = np.minimum(np.ceil(t.max(axis=0)).astype(np.int64), np.array(self.depth.shape) - 1)
+        i, j = np.meshgrid(
+            np.arange(lo[0], hi[0] + 1), np.arange(lo[1], hi[1] + 1), indexing="ij"
+        )
+        p = np.stack([i.ravel(), j.ravel()], axis=1).astype(np.float64)
+        # Barycentric coordinates; a sliver of a triangle at least marks the
+        # grid point its centre falls nearest.
+        e1, e2 = t[1] - t[0], t[2] - t[0]
+        det = e1[0] * e2[1] - e1[1] * e2[0]
+        inside = np.zeros(len(p), dtype=bool)
+        if abs(det) > 1e-12:
+            d = p - t[0]
+            u = (d[:, 0] * e2[1] - d[:, 1] * e2[0]) / det
+            v = (e1[0] * d[:, 1] - e1[1] * d[:, 0]) / det
+            inside = (u >= -1e-9) & (v >= -1e-9) & (u + v <= 1.0 + 1e-9)
+        centre = np.rint(t.mean(axis=0)).astype(np.int64)
+        inside |= (p[:, 0] == centre[0]) & (p[:, 1] == centre[1])
+        rows, cols = i.ravel()[inside], j.ravel()[inside]
+        self.depth[rows, cols] = np.minimum(self.depth[rows, cols], depth)
+
+    def hides(self, centroid: FloatArray, depth: FloatArray) -> BoolArray:
+        """Which faces lie downstream of an obstacle's back."""
+        index = np.rint((centroid @ self.plane.T - self.origin) / self.pixel).astype(np.int64)
+        on = np.all((index >= 0) & (index < np.array(self.depth.shape)), axis=1)
+        behind = np.full(len(depth), np.inf)
+        behind[on] = self.depth[index[on, 0], index[on, 1]]
+        result: BoolArray = depth > behind
+        return result
 
 
 def _spread(values: FloatArray, pairs: IntArray, degree: FloatArray) -> FloatArray:

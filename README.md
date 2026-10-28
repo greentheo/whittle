@@ -72,15 +72,15 @@ already buys. That is a table to read, so that is what a sweep gives you:
 ```
 removed  mass g  stiffness  deflect mm  stress MPa  safety
 -------  ------  ---------  ----------  ----------  ------
-     0%    40.2       100%       0.177         4.3    9.4x
-    10%    36.2        98%       0.179         4.3    9.4x
-    20%    32.2        95%       0.184         4.3    9.3x
-    30%    28.2        89%       0.193         4.4    9.1x
-    40%    24.1        80%       0.210         4.9    8.1x
-    50%    20.1        68%       0.242         6.4    6.3x
-    60%    16.1        53%       0.308         8.4    4.8x
-    70%    12.1        36%       0.439        13.3    3.0x
-    80%     8.0        19%       0.850        24.1    1.7x
+     0%    37.7       100%       0.177         4.3    9.4x
+    10%    33.9        98%       0.179         4.3    9.4x
+    20%    30.1        95%       0.184         4.3    9.3x
+    30%    26.3        89%       0.193         4.4    9.1x
+    40%    22.4        80%       0.210         4.9    8.1x
+    50%    18.7        68%       0.242         6.4    6.3x
+    60%    14.9        53%       0.308         8.4    4.8x
+    70%    11.1        36%       0.439        13.3    3.0x
+    80%     7.3        19%       0.850        24.1    1.7x
 ```
 
 That is `examples/02_shelf_bracket.py`: an 8 mm PLA bracket carrying 25 kg.
@@ -176,11 +176,12 @@ that moves the answer:
 
 | at least | best design | mass | drag | safety |
 |---|---|---|---|---|
-| 5x safe | carved 25%, lightened 22% | 8.0 kg | 24% | 25x |
-| 30x safe | carved 18%, lightened 33% -- or 25% / 15% | 8.4 / 8.7 kg | 30% / 24% | 32x / 35x |
-| 50x safe | carved 13%, lightened 15% | 11.9 kg | 54% | 57x |
+| 5x safe | carved 24%, lightened 26% | 7.6 kg | 18% | 25x |
+| 30x safe | carved 18%, lightened 32% -- or 24% / 15% | 8.0 / 8.7 kg | 32% / 18% | 34x / 35x |
+| 50x safe | carved 6%, lightened 30% -- or 18% / 0% | 9.9 / 12.0 kg | 83% / 32% | 65x / 52x |
 
-At 30x a genuine choice appears between a lighter pod and a slipperier one.
+From 30x up a genuine choice appears between a lighter pod and a slipperier
+one.
 The safety factors are high because the foam carries only 50 kg and the wind;
 they are bare foam, with no glass or carbon skin, so they are conservative.
 
@@ -193,6 +194,81 @@ answers for a yawed flow are not to be trusted.
 at least that thick: 40 mm on a 2 m pod. That is a real foam wall, which is
 why the example is foam. It is not a 4 mm moulded shell, and for one of those
 this would tell you where ribs and mounts belong, not what it weighs.
+
+## A parametric model instead of a mesh
+
+A flow study carves whatever STL you give it, which is why it works on
+anything -- and why what comes back is a mesh: the part's surface pushed
+around by a lattice, as smooth as that allows, with no trace of the
+dimensions it was drawn from. When the part already exists as a parametric model -- a CadQuery
+script, an OpenSCAD file, a few lines of numpy -- search its own numbers
+instead:
+
+```python
+from whittle import ParametricStudy
+
+def build(p):                 # every parameter, as a dict -> a mesh, or (vertices, faces)
+    ...
+
+study = ParametricStudy(
+    build,
+    {"tail": (100, 600), "drop": (0, 400), "pinch": (0, 300)},  # what to search
+    start={"tail": 300, "drop": 0, "pinch": 0, "width": 1880},  # the design as it stands
+    flow=(-1, 0, 0),
+    obstacles=[car],          # optional: what it rides in the wake of
+)
+sweep = study.sweep(remove_up_to=0.2)
+sweep.at(0.10).design         # {"tail": 590.0, "drop": 112.0, ...}: numbers to build to
+```
+
+The slider is the same -- volume given up against drag saved -- but every
+station is a real design from the model, as smooth as the model makes it, and
+what it hands back is a handful of numbers to type into the model rather than
+a mesh to reverse-engineer. A handful is also far easier to search than a
+lattice's eighty-odd moves. The builder sets the pace: it runs about
+`6 x parameters x 30 x effort` times per station, so keep the parameters few.
+
+- **CAD exports are evened out first.** They repeat every vertex along the
+  seams between faces, and pair big flat triangles with thin strips along
+  fillets. Unwelded, a box scores as six separate plates. Every shape is
+  welded, and its long edges split to about the size the drag model was
+  calibrated on, before the drag model sees it -- as a flow study does with
+  the part it is sent.
+- **A design that will not build is skipped.** A fillet too big for its edge
+  raises, the search moves on, and the sweep's note says how many failed and
+  why.
+- **The bounds say what may change.** Parameters not in the bounds are passed
+  through from `start` untouched. A design may grow if its bounds allow -- a
+  longer tail -- and its "removed" is then negative.
+
+**Riding in a wake.** `obstacles=` -- on `ParametricStudy`, `FlowStudy` and
+`DragModel` -- takes fixed bodies the part sits behind: the car in front of a
+hitch box. A face of the part downstream of an obstacle's silhouette feels no
+pressure and no friction, but still counts in the part's frontal area, so Cd
+stays a coefficient on the part's own size. Obstacles are never scored and
+never move, so keep them out of the part itself: merged into one STL, a flow
+study's lattice would drag the car along with the box.
+
+`examples/06_parametric_hitch_box.py` searches five numbers of a hitch box
+lofted from rounded sections -- the radius on the front edges, the radius on
+the long top edges, and where, how far down and how far in the tail tapers --
+once in free air and once behind a slab standing in for the car:
+
+| | drag | front r | top edge r | tail | drop | pinch |
+|---|---|---|---|---|---|---|
+| as drawn | 1197 N alone, 307 N behind the car | 20 | 20 | -- | 0 | 0 |
+| free air, 5% of the volume given up | 70% | 300 | 24 | 330 | 58 | 56 |
+| behind the car, 5% given up | 74% | 78 | 46 | 596 | 116 | 122 |
+
+In free air the square front is three quarters of the drag, and the search
+spends its first 5% rounding it as far as the bounds allow. Behind the car the
+front is mostly in the car's wake, a tenth of the drag, and the same 5% goes
+into a long tail taper instead: the top falling 12 cm and each side drawing in
+12 cm over the last 60 cm, ending at about 20 degrees -- the steepest the
+model lets the flow follow before it lets go. Both run out of gains near 10%,
+where the parameters reach their bounds. The model treats everything inside
+the car's silhouette as sheltered, which flatters the box behind it: trust the
+change of strategy more than the 307 N.
 
 ## How far to trust it
 
@@ -216,8 +292,9 @@ about a millisecond from the few facts that decide most of the drag of a
 bluff body at highway speed: faces into the wind are pushed on (Newtonian),
 convex shoulders get suction, a surface falling away steeper than about 20
 degrees sheds a wake, long thin sections shed a stronger two-dimensional one,
-friction scales with wetted area, and whatever sits in another body's wake is
-sheltered. Calibrated against high-Reynolds-number textbook values:
+friction scales with wetted area, and whatever sits in another body's wake --
+or an obstacle's -- is sheltered. Calibrated against high-Reynolds-number
+textbook values:
 
 | shape | model Cd | reference |
 |---|---|---|
@@ -233,8 +310,15 @@ order of the designs in a sweep. Treat its absolute numbers as good to perhaps
 30%, and optimistic for anything sitting in a car's own disturbed airflow,
 which it does not see. It cannot see vortex shedding, lift, or gaps between
 bodies, and its answers for air arriving at an angle are not to be trusted --
-which is why crosswind loads are built from two head-on cases instead. When those matter, take the two or three designs it
-picked to a real CFD run; that is what it is for.
+which is why crosswind loads are built from two head-on cases instead. When
+those matter, take the two or three designs it picked to a real CFD run; that
+is what it is for.
+
+It reads curvature over a few rings of neighbouring triangles, so it wants
+them roughly even. A CAD export is not, which is why both the flow study and
+the parametric one weld it and split its long edges first. Across a big fillet, halving the
+triangle size can still move the score by a few percent, so treat two radii
+that score within 5% of each other as a tie.
 
 ## Why evolutionary
 
@@ -256,22 +340,28 @@ can replace scipy's engine without touching anything else.
 
 ## Status
 
-**Works, tested (141 tests, ~30 s), runs today**
+**Works, tested (161 tests, ~51 s), runs today**
 
+- `ParametricStudy` -- tune a parametric model's own dimensions for drag,
+  CadQuery or otherwise, with the same slider
+- Obstacles -- fixed bodies a part rides in the wake of, like the car in
+  front of a hitch box
 - The web GUI -- load, click to place, run, slide, download; strength,
   airflow, or both
 - `DualStudy`, `DualSweep` -- carve for drag and lighten for load together,
   with wind loads from each shape and adaptive refinement
 - Load cases and distributed loads in the FEA (`Load(case=...)`, `FieldLoad`)
-- `LoadStudy`, `FlowStudy`, `Sweep` -- the part-in, slider-out workflow
+- `LoadStudy`, `FlowStudy`, `Sweep` -- the part-in, slider-out workflow;
+  a flow study carves the part as sent, so its first station is the part
 - `VoxelFEA` -- linear-elastic hex FEA, matrix-free CG, stress and safety
   factor, floating material dropped, broken load paths reported
 - `beso` -- bi-directional evolutionary structural optimization with stations
 - `DragModel` -- the drag estimate above, with a per-face breakdown of where
   the drag comes from
 - `whittle(...)` on every study -- choose the surfaces material comes from
-- `Grid` -- voxelizing any closed STL, selecting regions by point, face or
-  box, meshing results with smoothing that keeps volume
+- `Grid` -- voxelizing any closed STL, measuring how much of each voxel it
+  fills, selecting regions by point, face or box, and meshing results so
+  their outside lands where the part's was
 - `Compliance` -- the FEA as an objective for population search, replacing
   the geometric proxy `AnchorConnectivity` (which stays, as a cheap pre-filter)
 - `FFDLattice` -- now with frozen control points, mirror symmetry, inward-only
@@ -307,29 +397,33 @@ Times measured on one core of an M4 laptop. Everything is written to `out/`.
 |---|---|---|
 | `01_bridge.py` | population search on a density field, with the geometric proxy -- and the thread-thin result that proxy produces | 10 s |
 | `02_shelf_bracket.py` | `LoadStudy`: a solid bracket whittled to a truss, table above | 31 s |
-| `03_roof_box.py` | `FlowStudy`: a square 2 m roof box carved around a protected cargo block | 84 s |
-| `04_roof_bar.py` | `FlowStudy(extruded=...)`: a rectangular rack bar reshaped, as a 2D section | 35 s |
-| `05_dual_roof_box.py` | `DualStudy`: a 2 m foam pod on two bars with 50 kg of cargo, carved and lightened together | 132 s |
+| `03_roof_box.py` | `FlowStudy`: a square 2 m roof box carved around a protected cargo block | 91 s |
+| `04_roof_bar.py` | `FlowStudy(extruded=...)`: a rectangular rack bar reshaped, as a 2D section | 42 s |
+| `05_dual_roof_box.py` | `DualStudy`: a 2 m foam pod on two bars with 50 kg of cargo, carved and lightened together | 129 s |
+| `06_parametric_hitch_box.py` | `ParametricStudy`: five dimensions of a lofted hitch box, tuned in free air and behind the car (`obstacles=`) | 200 s |
 
 The roof box, for a taste of the flow side:
 
 ```
 removed  drag     Cd  CdA m2  N @110km/h
 -------  ----  -----  ------  ----------
-     0%  100%  0.797  0.2930       167.6
-     5%   81%  0.657  0.2380       136.1
-     9%   59%  0.484  0.1721        98.4
-    14%   32%  0.262  0.0938        53.6
-    19%   23%  0.196  0.0670        38.3
-    25%   21%  0.196  0.0620        35.5
+     0%  100%  1.071  0.3856       220.5
+     5%   83%  0.896  0.3189       182.4
+     9%   59%  0.644  0.2282       130.5
+    15%   34%  0.370  0.1293        73.9
+    20%   18%  0.206  0.0705        40.3
+    25%   16%  0.184  0.0620        35.4
 
-80% of the available drag saving by 14% removed
+80% of the available drag saving by 20% removed
 ```
 
 The nose rounds, then slopes, then the box narrows towards the front in plan --
 the shape commercial roof boxes converge on -- while the cargo block stays
-whole. The 5x drag reduction at the end is the model's free-air optimism; the
-ordering and the knee of the curve are the parts to act on.
+whole. The six-fold drag reduction at the end is the model's free-air
+optimism; the ordering and the knee of the curve are the parts to act on.
+The square box starts at Cd 1.07 because it is scored as the sharp box it
+is. Earlier versions carved a voxel copy whose edges came back rounded, which
+started it at 0.80 -- the carved end lands at the same 35 N either way.
 
 ## Where this is going
 

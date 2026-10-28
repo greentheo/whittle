@@ -27,13 +27,15 @@ from .types import Mesh
 class Station:
     """One stop on the slider: a design, and what it costs and buys."""
 
-    #: Fraction of the original part's material removed, in ``[0, 1)``.
+    #: Fraction of the original part's material removed, in ``[0, 1)`` --
+    #: or negative, for a parametric design whose bounds let it grow.
     removed: float
     #: Everything measured about this design. Keys depend on the study.
     metrics: dict[str, float]
     #: Builds the mesh on demand -- most stations are looked at, not printed.
     build: Callable[[], Mesh] = field(repr=False)
-    #: The raw design: a voxel occupancy for a load study, a genome for a flow study.
+    #: The raw design: a voxel occupancy for a load study, a genome for a flow
+    #: study, a dict of parameter values for a parametric one.
     design: object = field(default=None, repr=False)
     #: What scored it: an :class:`~whittle.physics.fea.FEAResult` for a load
     #: study, a :class:`~whittle.physics.drag.DragReport` for a flow study.

@@ -42,7 +42,8 @@ def main() -> None:
     )
     study.keep(((-750.0, -350.0, 0.0), (750.0, 350.0, 280.0)))
     original = study.analyze()
-    print(f"part:     {source.name}, {len(study.base.faces)} faces after re-meshing")
+    how = "re-meshed from voxels" if study.remeshed else "as sent, evened out"
+    print(f"part:     {source.name}, {len(study.base.faces)} faces, {how}")
     print(
         f"original: Cd {original.cd:.2f}, frontal {original.frontal_area * 1e-6:.3f} m2, "
         f"{original.force(110 / 3.6):.0f} N of drag at 110 km/h"

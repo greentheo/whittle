@@ -60,6 +60,7 @@ class Part:
     name: str
     mesh: Mesh
     _voxels: dict[int, tuple[Grid, BoolArray]] = field(default_factory=dict)
+    _coverage: dict[int, FloatArray] = field(default_factory=dict)
 
     def voxels(self, resolution: int) -> tuple[Grid, BoolArray]:
         """The part on a grid ``resolution`` voxels along its longest side. Cached."""
@@ -70,6 +71,13 @@ class Part:
                 raise BadRequest("the part voxelized to nothing -- is the mesh closed?")
             self._voxels[resolution] = (grid, solid)
         return self._voxels[resolution]
+
+    def coverage(self, resolution: int) -> FloatArray:
+        """How much of each voxel the part fills, on the grid :meth:`voxels` gives. Cached."""
+        if resolution not in self._coverage:
+            grid, _ = self.voxels(resolution)
+            self._coverage[resolution] = grid.coverage(self.mesh)
+        return self._coverage[resolution]
 
 
 @dataclass
@@ -233,11 +241,14 @@ class App:
 
     def _run_load(self, job: Job, progress: Callable[[float], None]) -> None:
         s = job.settings
-        grid, solid = job.part.voxels(_int(s, "resolution", 48, 8, 128))
+        resolution = _int(s, "resolution", 48, 8, 128)
+        grid, solid = job.part.voxels(resolution)
         material = str(s.get("material", "pla"))
         if material not in MATERIALS:
             raise BadRequest(f"unknown material {material!r}")
-        study = LoadStudy.from_voxels(grid, solid, material=material)
+        study = LoadStudy.from_voxels(
+            grid, solid, material=material, coverage=job.part.coverage(resolution)
+        )
         try:
             for item in s.get("supports", []):
                 study.support(**_region(item))

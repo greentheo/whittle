@@ -35,6 +35,7 @@ from .optimize.beso import beso
 from .optimize.evolve import evolve
 from .physics.drag import DragModel, DragReport
 from .physics.fea import FEAResult, Load, Material, Support, VoxelFEA, material
+from .surface import is_closed, split_long_edges, weld
 from .sweep import Column, Station, Sweep
 from .types import BoolArray, FloatArray, Mesh, Vector3
 from .voxel import Grid
@@ -95,24 +96,39 @@ class LoadStudy:
         solid = grid.voxelize(part)
         if not solid.any():
             raise ValueError("the part voxelized to nothing; is the mesh closed?")
-        self._setup(grid, solid, material)
+        self._setup(grid, solid, material, grid.coverage(part))
         self.part: Mesh | None = part
 
     @classmethod
     def from_voxels(
-        cls, grid: Grid, solid: BoolArray, *, material: str | Material = "pla"
+        cls,
+        grid: Grid,
+        solid: BoolArray,
+        *,
+        material: str | Material = "pla",
+        coverage: FloatArray | None = None,
     ) -> LoadStudy:
-        """A study of a part that is already a voxel occupancy on ``grid``."""
+        """A study of a part that is already a voxel occupancy on ``grid``.
+
+        Give ``coverage`` -- :meth:`~whittle.voxel.Grid.coverage` of the part
+        -- and the stations' meshes and masses follow the part's real surface;
+        without it they follow the voxels, up to half a voxel proud.
+        """
         study = cls.__new__(cls)
-        study._setup(grid, np.asarray(solid, dtype=bool), material)
+        study._setup(grid, np.asarray(solid, dtype=bool), material, coverage)
         study.part = None
         return study
 
-    def _setup(self, grid: Grid, solid: BoolArray, spec: str | Material) -> None:
+    def _setup(
+        self, grid: Grid, solid: BoolArray, spec: str | Material, coverage: FloatArray | None
+    ) -> None:
         if solid.shape != grid.shape:
             raise ValueError(f"occupancy must have shape {grid.shape}, got {solid.shape}")
+        if coverage is not None and coverage.shape != grid.shape:
+            raise ValueError(f"coverage must have shape {grid.shape}, got {coverage.shape}")
         self.grid = grid
         self.solid = solid
+        self.coverage = coverage
         self.material = material(spec)
         self.loads: list[Load] = []
         self.supports: list[Support] = []
@@ -280,8 +296,15 @@ class LoadStudy:
         result_stations = []
         for s in run.stations:
             result = s.result
+            if self.coverage is None:
+                voxels = float(s.solid.sum())
+                mesher = _mesher(self.grid, s.solid, smooth, relax)
+            else:
+                voxels = float(self.grid.share(s.solid, self.solid, self.coverage).sum())
+                field = self.grid.fitted(s.solid, self.solid, self.coverage, smooth=smooth)
+                mesher = _mesher(self.grid, field, 0.0, relax)
             metrics = {
-                "mass_g": float(s.solid.sum()) * voxel_cm3 * self.material.density,
+                "mass_g": voxels * voxel_cm3 * self.material.density,
                 "stiffness": baseline / result.compliance,
                 "deflection_mm": result.max_displacement,
                 "peak_stress_mpa": result.peak_stress,
@@ -291,7 +314,7 @@ class LoadStudy:
                 Station(
                     s.removed,
                     metrics,
-                    _mesher(self.grid, s.solid, smooth, relax),
+                    mesher,
                     design=s.solid,
                     analysis=result,
                 )
@@ -326,11 +349,18 @@ class FlowStudy:
     ``flow`` is the direction the air moves past the part, as in a wind
     tunnel: a box on a car driving towards +x sees ``(-1, 0, 0)``.
 
-    The part is re-meshed from voxels first, ``resolution`` along its longest
-    side, so any closed STL works however it was tessellated. Then a coarse
-    deformation lattice -- ``detail`` divisions per axis -- pushes its surface
-    inward, and each station of the sweep is the lowest-drag shape found that
-    removes at most that much of the original volume. Coarse is deliberate: two
+    The surface carved is the part's own, as sent: welded into one piece and
+    its long edges split to about the size of a voxel, ``resolution`` of which
+    span its longest side -- so the first station is the part itself, sharp
+    edges, flat faces and all. A part that is not one clean closed surface -- overlapping
+    shells, a hole, a fold through itself, or tessellated far finer than the
+    grid -- is re-meshed from voxels instead, from how much of each voxel it
+    fills, which keeps it within about a tenth of a voxel of where it was
+    though its edges come back rounded. ``remeshed`` says which happened.
+    Either way a coarse deformation lattice -- ``detail`` divisions per axis
+    -- pushes the surface inward, and each station of the sweep is the
+    lowest-drag shape found that removes at most that much of the original
+    volume. Coarse is deliberate: two
     divisions can taper a tail, slope a nose and round the corners, which is
     most of what drag wants, and a coarse lattice cannot make the wiggles that
     a fine one would use to game the model.
@@ -341,6 +371,10 @@ class FlowStudy:
     roof bars. :meth:`keep` protects a box of the interior from being cut into.
     :meth:`whittle` names the surfaces the carving may reshape; once any is
     named, every other surface stays exactly where it is.
+
+    ``obstacles`` are fixed bodies the part rides in the wake of, like the
+    car in front of a hitch box. Keep them out of ``part``: the lattice spans
+    the part alone, and an obstacle only shelters what is behind it.
 
     ``extruded`` is for long parts with a constant cross-section -- a roof bar,
     a strut, a fairing strip. Model a short slice of it, name the axis it runs
@@ -361,18 +395,21 @@ class FlowStudy:
         extruded: str | int | None = None,
         speed_kmh: float = 100.0,
         relax: int = 15,
+        obstacles: Sequence[Mesh] = (),
     ) -> None:
         self.part = part
         self.extruded = _AXES[extruded] if isinstance(extruded, str) else extruded
         if self.extruded is None:
-            self.model = DragModel(flow)
+            self.model = DragModel(flow, obstacles=obstacles)
         else:
-            self.model = DragModel(flow, aspect=float("inf"), ends=self.extruded)
+            self.model = DragModel(
+                flow, aspect=float("inf"), ends=self.extruded, obstacles=obstacles
+            )
         self.grid = Grid.around(part, resolution=resolution, pad=2)
         self.solid = self.grid.voxelize(part)
         if not self.solid.any():
             raise ValueError("the part voxelized to nothing; is the mesh closed?")
-        self.base = self.grid.mesh(self.solid, relax=relax)
+        self.base, self.remeshed = self._surface(part, relax)
         self.detail = (detail, detail, detail) if isinstance(detail, int) else detail
         self.mirror = _AXES[mirror] if isinstance(mirror, str) else mirror
         if self.extruded is not None:
@@ -390,6 +427,28 @@ class FlowStudy:
         self.speed_kmh = float(speed_kmh)
         self.keep_boxes: list[Box] = []
         self.surfaces = np.zeros(self.grid.shape, dtype=bool)
+
+    def _surface(self, part: Mesh, relax: int) -> tuple[Mesh, bool]:
+        """The surface to carve, and whether it had to be re-meshed from voxels."""
+        lo, hi = part.bounds
+        spacing = self.grid.spacing
+        welded = weld(part, 1e-5 * float(np.linalg.norm(hi - lo)))
+        if welded.volume < 0:
+            welded = Mesh(welded.vertices, welded.faces[:, ::-1].copy())
+        filled = self.grid.coverage(part)
+        # Overlapping shells, an inside-out one, or a surface folding through
+        # itself all make the signed volume disagree with what is really filled.
+        agrees = abs(welded.volume - float(filled.sum()) * spacing**3) <= 0.1 * welded.volume
+        # Far finer than the grid -- a scan, say -- costs every drag evaluation
+        # for detail the lattice cannot use.
+        coarse_enough = len(welded.faces) <= 16.0 * welded.area / spacing**2
+        if is_closed(welded) and welded.volume > 0 and agrees and coarse_enough:
+            # Split to about the size of the triangles a remesh would make.
+            return split_long_edges(welded, 1.5 * spacing), False
+        # The fraction filled is already free of voxel steps; blurring it
+        # further would only round the edges more.
+        field = self.grid.fitted(self.solid, self.solid, filled, smooth=0.0)
+        return self.grid.mesh(field, smooth=0.0, relax=relax), True
 
     def keep(self, box: Box) -> FlowStudy:
         """Protect a box inside the part from being carved into."""
@@ -622,8 +681,10 @@ class Carver:
         return start, start_drag
 
 
-def _mesher(grid: Grid, solid: BoolArray, smooth: float, relax: int) -> Callable[[], Mesh]:
-    return lambda: grid.mesh(solid, smooth=smooth, relax=relax)
+def _mesher(
+    grid: Grid, field: BoolArray | FloatArray, smooth: float, relax: int
+) -> Callable[[], Mesh]:
+    return lambda: grid.mesh(field, smooth=smooth, relax=relax)
 
 
 def _constant(mesh: Mesh) -> Callable[[], Mesh]:

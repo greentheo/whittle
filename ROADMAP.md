@@ -28,6 +28,30 @@ In build order.
   the surfaces material may come from; every other surface stays as it is --
   a kept skin for strength, zero-weight vertices for airflow, with the carving
   easing in over a few triangles. A "Whittle" tool in the GUI.
+- **Tuning a parametric model.** `ParametricStudy` searches a model's own
+  dimensions -- any function from a dict of parameters to a mesh, CadQuery
+  included -- against the drag model, and gives the same slider, each station
+  a set of numbers to build to. CAD tessellations are welded and evened
+  before scoring. Its first user is Caliper, which builds the model and
+  writes the chosen numbers back into it.
+- **A flow study carves the part as sent.** It used to re-mesh every part
+  from voxel centres, which put it up to half a voxel proud on any axis not
+  a whole number of voxels long -- a 39" box came back an inch bigger, with
+  8% more volume and its flat bottom an inch lower -- and rounded every edge,
+  which made a sharp box look 15% slipperier than it is. Now a clean closed
+  part is carved as it is, only welded and evened, so station 0 is the part
+  itself. A messy one is re-meshed from how much of each voxel it fills,
+  within a quarter of a voxel of where it was.
+- **Strength meshes and masses follow the part's surface.** A load study's
+  stations, and a dual study's lightened ones, are meshed from how much of
+  each voxel the part filled where they meet its outside, and weighed the
+  same way. They used to come back up to half a voxel proud and as much as
+  15% heavy -- worst on a lightened foam pod, which is mostly skin. Material
+  taken away still meshes on voxel boundaries, which is all there is to know
+  about it. `Grid.coverage` measures the fraction exactly along each ray.
+- **Obstacles.** Fixed bodies a part rides in the wake of -- the car in front
+  of a hitch box -- shelter it without being scored or moved, in the drag
+  model, `FlowStudy` and `ParametricStudy`.
 - **A fast approximate drag model** (the "panel method" route of old item 4,
   done as an engineering model rather than a potential-flow solve, because
   potential flow predicts zero drag). Calibrated to textbook high-Reynolds
@@ -112,5 +136,17 @@ terracing it brings is the obvious problem.
   nose, slope it and taper a tail, and cannot make the wiggles that would game
   the model. Three might find better shapes, or might find exploits.
 - **Where the genome should live.** An implicit SDF built from primitives is a
-  third representation worth trying -- far fewer parameters than a density
-  field, and a topology that can still change.
+  representation worth trying -- far fewer parameters than a density field,
+  and a topology that can still change. A parametric model is the other end
+  of that: fewest parameters of all, and exactly the topology its author drew.
+- **Curvature by rings, not millimetres.** The drag model smooths curvature
+  over four rings of neighbouring faces, so how far that reaches depends on
+  the mesh. Both studies split a part's long edges to about the same size,
+  and the rankings hold, but across large fillets the absolute number moves
+  by 5-10% with mesh density. Smoothing over a fixed distance would fix it,
+  at the cost of re-checking the calibration.
+- **Parts thinner than two voxels.** Meshes and masses follow the part's
+  real surface to within about a tenth of a voxel on anything thicker, but
+  a wall one voxel thick has both its faces in the same voxel, and no
+  fraction filled says where each one is. It comes out thinner than drawn.
+  A finer grid is the fix, as it is for everything else that small.

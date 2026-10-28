@@ -130,6 +130,28 @@ def test_sweep_navigation() -> None:
         Sweep("load", [])
 
 
+def test_load_stations_keep_the_part_outside_and_weigh_what_it_weighs() -> None:
+    # 13 x 7 mm is not a whole number of 4.2 mm voxels.
+    beam = shapes.box((100.0, 13.0, 7.0), center=(50.0, 6.5, 3.5), cell=1.0)
+    study = LoadStudy(beam, resolution=24, material="petg")
+    study.support(box=((0.0, 0.0, 0.0), (3.0, 13.0, 7.0)))
+    study.load((0.0, 0.0, -50.0), box=((96.0, 0.0, 0.0), (100.0, 13.0, 7.0)))
+    sweep = study.sweep(remove_up_to=0.4, stations=3)
+    lo, hi = beam.bounds
+    tolerance = 0.2 * study.grid.spacing
+    for station in sweep:
+        slo, shi = station.mesh.bounds
+        assert np.all(slo > lo - tolerance) and np.all(shi < hi + tolerance)
+    original = sweep.original
+    assert np.all(np.abs(original.mesh.bounds[0] - lo) < tolerance)
+    assert np.all(np.abs(original.mesh.bounds[1] - hi) < tolerance)
+    true_mass = beam.volume / 1000.0 * study.material.density
+    assert original.metrics["mass_g"] == pytest.approx(true_mass, rel=0.05)
+    # Without the part's coverage, a study goes by its voxels, as it always did.
+    voxels = LoadStudy.from_voxels(study.grid, study.solid, material="petg")
+    assert voxels.coverage is None
+
+
 @pytest.fixture(scope="module")
 def box_flow() -> tuple[FlowStudy, Sweep]:
     box = shapes.box((300.0, 120.0, 80.0), center=(0.0, 0.0, 40.0), cell=10.0)
@@ -172,6 +194,40 @@ def test_flow_sweep_keeps_symmetry_and_the_flat_bottom(box_flow: tuple[FlowStudy
     assert np.allclose(moves[:, 1, :, 1], 0.0)
     lo, hi = mesh.bounds
     assert lo[1] == pytest.approx(-hi[1], abs=study.grid.spacing * 0.6)
+
+
+def test_a_flow_study_carves_the_part_as_sent() -> None:
+    # A box as CAD would send it, twelve triangles, its sides not a whole
+    # number of voxels: station 0 is that box, not a voxel copy of it.
+    box = shapes.box((990.6, 1879.6, 1041.4), center=(-952.5, 0.0, 977.9), cell=5000.0)
+    study = FlowStudy(box, flow=(-1.0, 0.0, 0.0), resolution=16, mirror="y", flat=("-z",))
+    assert not study.remeshed
+    lo, hi = box.bounds
+    assert np.allclose(study.base.bounds[0], lo) and np.allclose(study.base.bounds[1], hi)
+    assert study.base.volume == pytest.approx(box.volume, rel=1e-9)
+    sweep = study.sweep(remove_up_to=0.1, stations=2, effort=0.2)
+    assert sweep.original.removed == pytest.approx(0.0, abs=1e-12)
+    assert sweep.original.mesh.volume == pytest.approx(box.volume, rel=1e-9)
+    # The flat bottom stays exactly where the part had it.
+    assert sweep[-1].mesh.bounds[0][2] == pytest.approx(lo[2], abs=1e-9)
+
+
+def test_a_part_that_is_not_one_clean_surface_is_remeshed_where_it_was() -> None:
+    # Two boxes overlapping, as two shells: the signed volume counts the overlap twice.
+    a = shapes.box((1000.0, 600.0, 400.0), center=(0.0, 0.0, 200.0), cell=50.0)
+    b = shapes.box((600.0, 600.0, 400.0), center=(500.0, 0.0, 300.0), cell=50.0)
+    both = Mesh(
+        np.concatenate([a.vertices, b.vertices]),
+        np.concatenate([a.faces, b.faces + len(a.vertices)]),
+    )
+    study = FlowStudy(both, flow=(-1.0, 0.0, 0.0), resolution=24)
+    assert study.remeshed
+    lo, hi = both.bounds
+    blo, bhi = study.base.bounds
+    # Within a quarter of a voxel, where taking which centres were inside left
+    # it as much as half a voxel out.
+    assert np.all(np.abs(blo - lo) < 0.25 * study.grid.spacing)
+    assert np.all(np.abs(bhi - hi) < 0.25 * study.grid.spacing)
 
 
 def test_flow_study_validates_sides() -> None:

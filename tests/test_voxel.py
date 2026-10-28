@@ -67,6 +67,51 @@ def test_meshing_a_voxelization_round_trips_the_volume() -> None:
     assert np.allclose((lo + hi) / 2.0, 0.0, atol=0.3)
 
 
+def test_coverage_puts_an_unaligned_surface_back_where_it_was() -> None:
+    # 41" is not a whole number of 47 mm voxels: meshed from which centres are
+    # inside, the box comes back about half a voxel proud on that axis.
+    box = shapes.box((990.6, 1879.6, 1041.4), center=(0.0, 0.0, 977.9), cell=2000.0)
+    grid = Grid.around(box, resolution=40, pad=2)
+    filled = grid.coverage(box)
+    assert filled.min() >= 0.0 and filled.max() <= 1.0
+    assert filled.sum() * grid.spacing**3 == pytest.approx(box.volume, rel=0.02)
+    lo, hi = box.bounds
+    from_centres = grid.mesh(grid.voxelize(box))
+    from_coverage = grid.mesh(filled, smooth=0.0)
+    assert from_centres.bounds[0][2] < lo[2] - 0.4 * grid.spacing
+    assert from_coverage.bounds[0][2] == pytest.approx(lo[2], abs=0.15 * grid.spacing)
+    assert from_coverage.bounds[1][2] == pytest.approx(hi[2], abs=0.15 * grid.spacing)
+
+
+def test_coverage_is_exact_along_the_rays() -> None:
+    # A plate a third of a voxel thick: voxel centres miss it entirely or take
+    # a whole layer, but where the rays cross it is known exactly.
+    plate = shapes.box((100.0, 100.0, 3.0), center=(0.0, 0.0, 1.5), cell=50.0)
+    grid = Grid((12, 12, 3), 10.0, (-55.0, -55.0, -8.0))
+    filled = grid.coverage(plate)
+    assert filled.sum() * grid.voxel_volume == pytest.approx(plate.volume, rel=1e-6)
+    assert grid.voxelize(plate).sum() * grid.voxel_volume != pytest.approx(plate.volume, rel=0.5)
+
+
+def test_a_design_meshed_by_its_share_keeps_the_part_outside() -> None:
+    box = shapes.box((100.0, 13.0, 7.0), center=(50.0, 6.5, 3.5), cell=1.0)
+    grid = Grid.around(box, resolution=24)
+    solid, filled = grid.voxelize(box), grid.coverage(box)
+    assert grid.share(solid, solid, filled).sum() * grid.voxel_volume == pytest.approx(
+        box.volume, rel=0.05
+    )
+    lo, hi = box.bounds
+    mesh = grid.mesh(grid.fitted(solid, solid, filled), smooth=0.0)
+    # Two voxels thick, which is as thin as this gets right: within a fifth.
+    assert np.all(np.abs(mesh.bounds[0] - lo) < 0.2 * grid.spacing)
+    assert np.all(np.abs(mesh.bounds[1] - hi) < 0.2 * grid.spacing)
+    # Taking the middle away opens a hole through it, and the share drops to match.
+    design = solid & ~grid.box((40.0, -10.0, -10.0), (60.0, 30.0, 30.0))
+    assert grid.share(design, solid, filled).sum() < grid.share(solid, solid, filled).sum()
+    halves = grid.mesh(grid.fitted(design, solid, filled), smooth=0.0)
+    assert halves.volume < 0.9 * mesh.volume
+
+
 def test_taubin_smoothing_keeps_the_volume_and_flattens_the_terraces() -> None:
     sphere = shapes.sphere(10.0, subdivisions=4)
     grid = Grid.around(sphere, spacing=1.0, pad=2)
