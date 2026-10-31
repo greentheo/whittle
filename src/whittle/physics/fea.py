@@ -251,6 +251,7 @@ class VoxelFEA:
         material: str | Material = "pla",
         loads: Sequence[Load | FieldLoad],
         supports: Sequence[Support],
+        stiffness: FloatArray | None = None,
     ) -> None:
         if not loads:
             raise ValueError("need at least one load")
@@ -259,6 +260,9 @@ class VoxelFEA:
         self.shape = shape
         self.spacing = float(spacing)
         self.material = _resolve(material)
+        #: A part of two materials: each voxel's stiffness as a multiple of ``material``'s (a plywood top on
+        #: printed sides). ``None`` is one material throughout. Stress follows each voxel's own stiffness.
+        self.stiffness = self._check_stiffness(stiffness)
         self.loads = list(loads)
         self.supports = list(supports)
         for load in self.loads:
@@ -334,6 +338,16 @@ class VoxelFEA:
         # held perfectly rigid -- rather than by the part. One voxel of margin.
         self._attachment = ndimage.binary_dilation(attached)
 
+    def _check_stiffness(self, stiffness: FloatArray | None) -> FloatArray | None:
+        if stiffness is None:
+            return None
+        stiffness = np.asarray(stiffness, dtype=np.float64)
+        if stiffness.shape != self.shape:
+            raise ValueError(f"stiffness must have shape {self.shape}, got {stiffness.shape}")
+        if not np.all(stiffness > 0):
+            raise ValueError("stiffness must be positive everywhere")
+        return stiffness
+
     @property
     def attachment(self) -> BoolArray:
         """Voxels at or next to a load or support, excluded from :meth:`peak_stress`."""
@@ -344,11 +358,17 @@ class VoxelFEA:
         self,
         solid: BoolArray,
         *,
+        stiffness: FloatArray | None = None,
         rtol: float = 1e-5,
         maxiter: int = 20_000,
     ) -> FEAResult:
-        """Solve for the displacement of the part made of ``solid`` voxels."""
+        """Solve for the displacement of the part made of ``solid`` voxels.
+
+        ``stiffness`` (each voxel's, as a multiple of the material's) overrides the one this solver was made
+        with, for this solve.
+        """
         solid = np.asarray(solid, dtype=bool)
+        scaled = self.stiffness if stiffness is None else self._check_stiffness(stiffness)
         if solid.shape != self.shape:
             raise ValueError(f"solid must have shape {self.shape}, got {solid.shape}")
 
@@ -368,16 +388,21 @@ class VoxelFEA:
             return self._unsupported(kept)
         n_dof = self.n_dof
         ke = self._ke
+        scale = None if scaled is None else scaled.ravel()[elements]
 
         def matvec(x: FloatArray) -> FloatArray:
             full = np.zeros(n_dof, dtype=np.float64)
             full[free] = x
             product = full[edof] @ ke
+            if scale is not None:
+                product *= scale[:, None]
             y = np.bincount(flat, weights=product.ravel(), minlength=n_dof)
             result: FloatArray = y[free].astype(np.float64, copy=False)
             return result
 
         weights = np.tile(self._ke_diag, len(elements))
+        if scale is not None:
+            weights = weights * np.repeat(scale, 24)
         diagonal = np.bincount(flat, weights=weights, minlength=n_dof)
         diagonal = diagonal.astype(np.float64, copy=False)
         inverse_diagonal = 1.0 / diagonal[free]
@@ -412,8 +437,12 @@ class VoxelFEA:
             u = np.zeros(n_dof, dtype=np.float64)
             u[free] = u_free
             ue = u[edof]
-            energy[elements] += 0.5 * np.einsum("ij,ij->i", ue @ ke, ue)
+            element_energy = 0.5 * np.einsum("ij,ij->i", ue @ ke, ue)
             stress = np.max([_von_mises(ue @ corner.T) for corner in self._stress], axis=0)
+            if scale is not None:
+                element_energy = element_energy * scale
+                stress = stress * scale
+            energy[elements] += element_energy
             vm[elements] = np.maximum(vm[elements], stress)
             compliances.append(float(force[free] @ u_free))
             largest = max(largest, float(np.linalg.norm(u.reshape(-1, 3), axis=1).max()))
