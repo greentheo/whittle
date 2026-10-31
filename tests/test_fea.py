@@ -209,3 +209,27 @@ def test_a_field_load_on_floating_material_is_unsupported() -> None:
     assert not fea.solve(solid).supported
     with pytest.raises(ValueError, match=r"forces must have shape"):
         VoxelFEA(shape, loads=[FieldLoad(np.zeros((2, 2, 2, 3)))], supports=[Support(clamp)])
+
+
+def test_a_stiffness_per_voxel_makes_a_part_of_two_materials() -> None:
+    """A plywood top on printed sides: each voxel's stiffness as a multiple of the material's."""
+    fea, solid = _cantilever(30, 4, 6)
+    one = fea.solve(solid)
+    # twice as stiff everywhere: half the deflection, the same stress (stress follows the load)
+    twice = fea.solve(solid, stiffness=np.full(solid.shape, 2.0))
+    assert twice.max_displacement == pytest.approx(one.max_displacement / 2, rel=1e-3)
+    assert np.allclose(twice.von_mises[solid], one.von_mises[solid], rtol=1e-3, atol=1e-6)
+    assert twice.compliance == pytest.approx(one.compliance / 2, rel=1e-3)
+    # stiffer near the clamp only: in between, and the stiff voxels take more of the stress
+    half = np.ones(solid.shape)
+    half[:15] = 4.0
+    mixed = fea.solve(solid, stiffness=half)
+    assert twice.max_displacement / 2 < mixed.max_displacement < one.max_displacement
+    # a solver made with a stiffness uses it, and a study passes its own through
+    made = VoxelFEA(solid.shape, material="pla", loads=fea.loads, supports=fea.supports,
+                    stiffness=np.full(solid.shape, 2.0))
+    assert made.solve(solid).max_displacement == pytest.approx(twice.max_displacement, rel=1e-6)
+    with pytest.raises(ValueError, match="shape"):
+        fea.solve(solid, stiffness=np.ones((2, 2, 2)))
+    with pytest.raises(ValueError, match="positive"):
+        fea.solve(solid, stiffness=np.zeros(solid.shape))

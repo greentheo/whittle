@@ -134,6 +134,8 @@ class LoadStudy:
         self.supports: list[Support] = []
         self.protected = np.zeros(grid.shape, dtype=bool)
         self.surfaces = np.zeros(grid.shape, dtype=bool)
+        #: Each voxel's stiffness as a multiple of ``material``'s, for a part of two materials; None is one.
+        self.stiffness: FloatArray | None = None
 
     def region(
         self,
@@ -234,6 +236,7 @@ class LoadStudy:
             material=self.material,
             loads=self.loads,
             supports=self.supports,
+            stiffness=self.stiffness,
         )
 
     def analyze(self) -> FEAResult:
