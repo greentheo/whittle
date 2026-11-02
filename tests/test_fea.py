@@ -220,6 +220,10 @@ def test_a_stiffness_per_voxel_makes_a_part_of_two_materials() -> None:
     assert twice.max_displacement == pytest.approx(one.max_displacement / 2, rel=1e-3)
     assert np.allclose(twice.von_mises[solid], one.von_mises[solid], rtol=1e-3, atol=1e-6)
     assert twice.compliance == pytest.approx(one.compliance / 2, rel=1e-3)
+    # and half the strain energy in every voxel: the stiffness scales each element's energy, not only the
+    # solve (the carve ranks voxels by it)
+    peak = one.strain_energy[solid].max()
+    assert np.allclose(twice.strain_energy[solid], one.strain_energy[solid] / 2, rtol=1e-3, atol=1e-6 * peak)
     # stiffer near the clamp only: in between, and the stiff voxels take more of the stress
     half = np.ones(solid.shape)
     half[:15] = 4.0
