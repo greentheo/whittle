@@ -34,7 +34,9 @@ which is what :data:`MATERIALS` assumes.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -48,6 +50,25 @@ from . import multigrid
 #: How CG is preconditioned: ``"multigrid"`` (see :mod:`.multigrid`) or ``"jacobi"``, the
 #: inverse diagonal -- simpler, and a few times more iterations on anything slender.
 PRECONDITIONERS = ("multigrid", "jacobi")
+
+
+
+def _case_threads() -> int:
+    setting = os.environ.get("WHITTLE_CASE_THREADS", "4")
+    try:
+        threads = int(setting)
+    except ValueError:
+        threads = 0
+    if threads < 1:
+        raise ValueError(f"WHITTLE_CASE_THREADS must be a whole number of threads, got {setting!r}")
+    return threads
+
+
+#: Load cases a multigrid solve works on at once, each its own CG on its own thread over
+#: the one shared hierarchy, which they only read. Each case's answer is exactly what it
+#: gets alone, bit for bit; three cases finish in under half the time. 1 solves them one
+#: after another. Set from the ``WHITTLE_CASE_THREADS`` environment variable, default 4.
+CASE_THREADS = _case_threads()
 
 
 @dataclass(frozen=True)
@@ -464,15 +485,26 @@ class VoxelFEA:
         # Each load case is its own solve. The design is judged on all of them:
         # strain energy adds up, so material that works in either case is kept,
         # and stress is the worst any case puts on a voxel.
-        for force in self.forces:
+        solved: list[tuple[FloatArray, str, int]] = []
+        if grids is not None:
+            cycle, patience = grids.cycle, min(maxiter, multigrid.PATIENCE)
+
+            def by_multigrid(b: FloatArray) -> tuple[FloatArray, str, int]:
+                return multigrid.pcg(matvec, cycle, b, rtol=rtol, maxiter=patience)
+
+            loads = [force[free] for force in self.forces]
+            threads = min(len(loads), CASE_THREADS)
+            if threads > 1:
+                with ThreadPoolExecutor(threads) as pool:
+                    solved = list(pool.map(by_multigrid, loads))
+            else:
+                solved = [by_multigrid(b) for b in loads]
+        for case, force in enumerate(self.forces):
             b = force[free]
             if grids is None:
                 u_free, info = cg(operator, b, rtol=rtol, maxiter=maxiter, M=jacobi, callback=count)
             else:
-                patience = min(maxiter, multigrid.PATIENCE)
-                u_free, ending, used = multigrid.pcg(
-                    matvec, grids.cycle, b, rtol=rtol, maxiter=patience
-                )
+                u_free, ending, used = solved[case]
                 iterations += used
                 info = 0 if ending == "converged" else 1
             if grids is not None and info != 0:

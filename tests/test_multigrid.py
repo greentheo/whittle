@@ -384,3 +384,79 @@ def test_a_result_says_when_jacobi_had_to_finish_the_job(monkeypatch: pytest.Mon
     assert impatient.iterations == 2 + impatient.fallback_iterations  # one wasted per case
     assert impatient.fallback_iterations > 10 * usual.iterations
     assert impatient.case_compliance == pytest.approx(usual.case_compliance, rel=1e-5)
+
+
+def _three_case_beam() -> tuple[VoxelFEA, np.ndarray]:
+    shape = (120, 6, 8)
+    clamp = np.zeros(shape, dtype=bool)
+    clamp[0] = True
+    tip = np.zeros(shape, dtype=bool)
+    tip[-1] = True
+    near = np.zeros(shape, dtype=bool)
+    near[8] = True
+    solid = np.ones(shape, dtype=bool)
+    solid[10:110:12, :, 2:6] = False
+    loads = [
+        Load(tip, (0.0, 0.0, -10.0)),
+        Load(tip, (0.0, 5.0, 0.0), case=1),
+        Load(near, (0.0, 0.0, -10.0), case=2),
+    ]
+    return VoxelFEA(shape, loads=loads, supports=[Support(clamp)]), solid
+
+
+def test_threads_never_change_an_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Over repeated runs and any number of threads: the same bits. Nothing is summed
+    # across cases, so there is no order for threads to change.
+    fea, solid = _three_case_beam()
+    results = []
+    for threads in (1, 2, 4, 4, 2):
+        monkeypatch.setattr("whittle.physics.fea.CASE_THREADS", threads)
+        results.append(fea.solve(solid))
+    first = results[0]
+    for other in results[1:]:
+        assert other.iterations == first.iterations
+        assert other.case_compliance == first.case_compliance
+        assert np.array_equal(other.displacement, first.displacement)
+        assert np.array_equal(other.strain_energy, first.strain_energy)
+        assert np.array_equal(other.von_mises, first.von_mises)
+
+
+def test_a_fallback_or_a_failure_on_a_thread_is_never_lost(monkeypatch: pytest.MonkeyPatch) -> None:
+    fea, solid = _three_case_beam()
+    monkeypatch.setattr(mg, "PATIENCE", 1)
+    monkeypatch.setattr("whittle.physics.fea.CASE_THREADS", 1)
+    serial = fea.solve(solid)
+    monkeypatch.setattr("whittle.physics.fea.CASE_THREADS", 3)
+    threaded = fea.solve(solid)
+    assert threaded.fell_back and serial.fell_back
+    assert threaded.fallback_iterations == serial.fallback_iterations > 0
+    assert threaded.iterations == serial.iterations
+
+    def boom(self: mg.Multigrid, b: np.ndarray, depth: int = 0) -> np.ndarray:
+        raise RuntimeError("the cycle failed")
+
+    monkeypatch.setattr(mg.Multigrid, "cycle", boom)
+    with pytest.raises(RuntimeError, match="the cycle failed"):
+        fea.solve(solid)
+
+
+@pytest.mark.parametrize(("setting", "threads"), [("1", 1), ("6", 6), (None, 4)])
+def test_case_threads_come_from_the_environment(
+    setting: str | None, threads: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from whittle.physics import fea as module
+
+    if setting is None:
+        monkeypatch.delenv("WHITTLE_CASE_THREADS", raising=False)
+    else:
+        monkeypatch.setenv("WHITTLE_CASE_THREADS", setting)
+    assert module._case_threads() == threads
+
+
+@pytest.mark.parametrize("setting", ["0", "-2", "four", ""])
+def test_a_bad_thread_count_is_refused(setting: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    from whittle.physics import fea as module
+
+    monkeypatch.setenv("WHITTLE_CASE_THREADS", setting)
+    with pytest.raises(ValueError, match="WHITTLE_CASE_THREADS"):
+        module._case_threads()
