@@ -67,7 +67,9 @@ POWER_STEPS = 12
 #: (which :attr:`~whittle.physics.fea.FEAResult.fell_back` reports): at once if the cycle
 #: breaks down, which every broken cycle measured did within a few iterations; when its
 #: best residual has fallen by less than a tenth over the last ``STALL`` iterations; or
-#: after ``PATIENCE`` iterations, past which Jacobi would have been cheaper anyway.
+#: after ``PATIENCE`` iterations, past which Jacobi would have been cheaper anyway. Jacobi
+#: then starts from zero, not from multigrid's iterate: what multigrid leaves is error it
+#: could not reduce, which was measured to cost Jacobi more than starting afresh.
 #: Healthy solves of carved BESO designs fall by 2.3x or more in every 100 iterations;
 #: a slow but steady one can sit flat for 100, never for 200.
 STALL = 200
@@ -255,9 +257,7 @@ def pcg(
     if not rz > 0:
         return x, "broke down", 0
     p = z
-    # The best residual so far, after each iteration: progress is judged on it, since
-    # CG's residual itself need not fall every step.
-    best = [float(np.linalg.norm(r))]
+    norms = [float(np.linalg.norm(r))]
     for iteration in range(1, maxiter + 1):
         q = apply(p)
         pq = float(p @ q)
@@ -269,8 +269,8 @@ def pcg(
         norm = float(np.linalg.norm(r))
         if norm <= target:
             return x, "converged", iteration
-        best.append(min(best[-1], norm))
-        if iteration >= STALL and best[-1] > STALL_PROGRESS * best[-1 - STALL]:
+        norms.append(norm)
+        if _stalled(norms):
             return x, "stalled", iteration
         z = cycle(r)
         rz_next = float(r @ z)
@@ -279,6 +279,17 @@ def pcg(
         p = z + (rz_next / rz) * p
         rz = rz_next
     return x, "out of iterations", maxiter
+
+
+def _stalled(norms: list[float]) -> bool:
+    """Whether a solve whose residual has gone ``norms`` (from the start) has stopped improving.
+
+    Judged on the best residual so far, not the latest: CG's residual need not fall every
+    step, and on a slender part can sit well above its best for a long while.
+    """
+    if len(norms) <= STALL:
+        return False
+    return min(norms) > STALL_PROGRESS * min(norms[:-STALL])
 
 
 @dataclass

@@ -476,14 +476,12 @@ class VoxelFEA:
                 iterations += used
                 info = 0 if ending == "converged" else 1
             if grids is not None and info != 0:
-                # Multigrid has met a part it cannot help with: its residual stopped
-                # falling, or the cycle broke down. The plain solve is slow but always
-                # gets there -- from wherever multigrid got to, unless it broke down.
-                start = None if ending == "broke down" else u_free
+                # Multigrid has met a part it cannot help with: the cycle broke down, its
+                # residual stopped falling, or it ran out of patience. The plain solve is
+                # slow but always gets there. From zero: what multigrid leaves behind is the
+                # error it could not reduce, and Jacobi does worse from there than afresh.
                 before = iterations
-                u_free, info = cg(
-                    operator, b, x0=start, rtol=rtol, maxiter=maxiter, M=jacobi, callback=count
-                )
+                u_free, info = cg(operator, b, rtol=rtol, maxiter=maxiter, M=jacobi, callback=count)
                 fell_back = True
                 fallback_iterations += iterations - before
             converged &= info == 0

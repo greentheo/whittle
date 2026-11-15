@@ -236,6 +236,31 @@ def test_a_cycle_that_points_the_wrong_way_hands_over_at_once(
     assert np.allclose(rescued.displacement, jacobi.displacement, atol=1e-8 * scale)
 
 
+def test_a_cycle_that_goes_wrong_mid_solve_hands_over_there(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fea, kept = _awkward()
+    jacobi = fea.solve(kept, preconditioner="jacobi", rtol=1e-10)
+    calls = 0
+    cycle = mg.Multigrid.cycle
+
+    def soured(self: mg.Multigrid, b: np.ndarray, depth: int = 0) -> np.ndarray:
+        # Right for CG's first three calls -- the start and two iterations -- then
+        # backwards. (The cycle calls itself once per grid; only the top call is CG's.)
+        nonlocal calls
+        result: np.ndarray = cycle(self, b, depth)
+        if depth:
+            return result
+        calls += 1
+        return result if calls <= 3 else -result
+
+    monkeypatch.setattr(mg.Multigrid, "cycle", soured)
+    rescued = fea.solve(kept, rtol=1e-10)
+    assert rescued.converged and rescued.fell_back
+    assert rescued.iterations == 3 + jacobi.iterations
+    assert rescued.fallback_iterations == jacobi.iterations
+
+
 def _slotted() -> tuple[VoxelFEA, np.ndarray]:
     shape = (120, 6, 8)
     clamp = np.zeros(shape, dtype=bool)
@@ -285,18 +310,18 @@ def test_patience_is_still_a_hard_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(mg, "PATIENCE", 100)
     capped = fea.solve(solid)
     assert capped.converged and capped.fell_back
-    assert capped.iterations == 100 + capped.fallback_iterations
-    # Jacobi picks up where multigrid left off, so it has less left to do.
-    assert capped.fallback_iterations < jacobi.iterations
+    # Jacobi starts afresh, so it takes exactly what it takes alone.
+    assert capped.fallback_iterations == jacobi.iterations
+    assert capped.iterations == 100 + jacobi.iterations
     assert capped.compliance == pytest.approx(reference, rel=1e-5)
 
 
-def test_a_solve_that_stalls_hands_over_from_where_it_got_to(
+def test_a_solve_that_stalls_hands_over_when_its_window_says_so(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # A cycle that all but ignores half the unknowns: positive, so CG never breaks down,
-    # but once it has fixed the other half its residual stops falling. It hands over
-    # after the window, and Jacobi finishes.
+    # but once it has fixed the other half its residual stops falling. It must hand over
+    # as stalled -- well before the hard cap would have caught it.
     fea, solid = _slotted()
     jacobi = fea.solve(solid, preconditioner="jacobi")
 
@@ -306,10 +331,33 @@ def test_a_solve_that_stalls_hands_over_from_where_it_got_to(
         return result
 
     monkeypatch.setattr(mg.Multigrid, "cycle", half)
+    grids = _grids(fea, solid, monkeypatch)
+    elements = np.flatnonzero(solid.ravel())
+    active = np.zeros(fea.n_dof, dtype=bool)
+    active[fea._edof[elements].ravel()] = True
+    b = fea.forces[0][np.flatnonzero(active & ~fea._fixed)]
+    _, ending, used = mg.pcg(grids.levels[0].apply, grids.cycle, b, rtol=1e-5, maxiter=mg.PATIENCE)
+    assert ending == "stalled" and mg.STALL <= used < mg.PATIENCE // 2
     stalled = fea.solve(solid)
     assert stalled.converged and stalled.fell_back
-    assert stalled.iterations - stalled.fallback_iterations >= mg.STALL
+    assert stalled.iterations == used + jacobi.iterations
+    assert stalled.fallback_iterations == jacobi.iterations
     assert stalled.compliance == pytest.approx(jacobi.compliance, rel=1e-5)
+
+
+def test_a_stall_is_judged_on_the_best_residual_not_the_latest() -> None:
+    window = mg.STALL
+    # Falling a tenth of a percent an iteration, with every other one spiking far above:
+    # the best keeps falling, so it is not a stall, whatever the latest says.
+    spiky = [0.999**k if k % 2 == 0 else 10.0 for k in range(3 * window)]
+    assert not any(mg._stalled(spiky[: k + 1]) for k in range(len(spiky)))
+    # Down by half, then flat: a stall, once a whole window has gone by on the flat.
+    flat = [1.0] + [0.5] * (2 * window)
+    assert not mg._stalled(flat[: window + 1])
+    assert mg._stalled(flat[: window + 2])
+    # Steady progress, a fifth of a percent an iteration: never.
+    steady = [0.998**k for k in range(3 * window)]
+    assert not any(mg._stalled(steady[: k + 1]) for k in range(len(steady)))
 
 
 def test_a_result_says_when_jacobi_had_to_finish_the_job(monkeypatch: pytest.MonkeyPatch) -> None:
