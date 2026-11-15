@@ -207,8 +207,8 @@ def _assemble(k: FloatArray, corners: IntArray) -> sparse.bsr_matrix:
 def _largest(apply: Apply, inverse_diagonal: FloatArray) -> float:
     """Estimate the largest eigenvalue of ``D^-1 K``: Lanczos on ``D^-1/2 K D^-1/2``.
 
-    A dozen steps land within half a percent of it, where a dozen power steps were
-    measured 15-25% low -- enough to put the true value past the top of the smoothing
+    A dozen steps land within a percent of it, and never over; a dozen power steps were
+    measured 7-33% low -- enough to put the true value past the top of the smoothing
     interval, where the Chebyshev polynomial grows instead of damping.
     """
     scale = np.sqrt(inverse_diagonal)
