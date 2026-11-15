@@ -60,7 +60,7 @@ def _case_threads() -> int:
     except ValueError:
         threads = 0
     if threads < 1:
-        raise ValueError(f"WHITTLE_CASE_THREADS must be a whole number of threads, got {setting!r}")
+        raise ValueError(f"WHITTLE_CASE_THREADS must be a whole number, 1 or more, got {setting!r}")
     return threads
 
 

@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+import threading
+from pathlib import Path
+
 import numpy as np
 import pytest
 from scipy import ndimage, sparse
 
+import whittle
 from whittle import Load, Support, VoxelFEA
 from whittle.physics import multigrid as mg
 
@@ -440,17 +447,40 @@ def test_a_fallback_or_a_failure_on_a_thread_is_never_lost(monkeypatch: pytest.M
         fea.solve(solid)
 
 
-@pytest.mark.parametrize(("setting", "threads"), [("1", 1), ("6", 6), (None, 4)])
-def test_case_threads_come_from_the_environment(
-    setting: str | None, threads: int, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from whittle.physics import fea as module
+@pytest.mark.parametrize(("setting", "threads"), [("1", 1), ("2", 2), (None, 4)])
+def test_case_threads_come_from_the_environment(setting: str | None, threads: int) -> None:
+    # As caliper will set it: in the environment, before whittle is imported.
+    env = {k: v for k, v in os.environ.items() if k != "WHITTLE_CASE_THREADS"}
+    if setting is not None:
+        env["WHITTLE_CASE_THREADS"] = setting
+    env["PYTHONPATH"] = str(Path(whittle.__file__).parents[1])
+    script = "from whittle.physics import fea; print(fea.CASE_THREADS)"
+    out = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert int(out.stdout) == threads
 
-    if setting is None:
-        monkeypatch.delenv("WHITTLE_CASE_THREADS", raising=False)
+
+@pytest.mark.parametrize(("setting", "cases", "most"), [(1, 3, 0), (2, 3, 2), (3, 3, 3), (4, 3, 3)])
+def test_cases_run_on_as_many_threads_as_allowed(
+    setting: int, cases: int, most: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fea, solid = _three_case_beam()
+    seen: list[threading.Thread] = []
+    pcg = mg.pcg
+
+    def spy(*args: object, **kwargs: object) -> tuple[np.ndarray, str, int]:
+        seen.append(threading.current_thread())
+        return pcg(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(mg, "pcg", spy)
+    monkeypatch.setattr("whittle.physics.fea.CASE_THREADS", setting)
+    fea.solve(solid)
+    assert len(seen) == cases
+    workers = {t for t in seen if t is not threading.main_thread()}
+    if most == 0:
+        assert not workers  # one at a time, on the caller's own thread
     else:
-        monkeypatch.setenv("WHITTLE_CASE_THREADS", setting)
-    assert module._case_threads() == threads
+        assert len(workers) == most and threading.main_thread() not in seen
 
 
 @pytest.mark.parametrize("setting", ["0", "-2", "four", ""])
