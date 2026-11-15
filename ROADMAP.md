@@ -71,9 +71,9 @@ In build order.
   test parts become 8-24, from 30k voxels to 400k alike -- 17-56x faster
   from 150k up, with the same answer to within the solve's tolerance
   (2e-6 or better, where Jacobi and multigrid stop at rtol 1e-5). Jacobi
-  stays, as `preconditioner="jacobi"`, and takes over any load case
-  multigrid hasn't finished in 250 iterations -- `FEAResult.fell_back`
-  says when it did.
+  stays, as `preconditioner="jacobi"`, and takes over any load case where
+  multigrid's cycle breaks down or its residual stalls for 200 iterations
+  (or that runs to 1,000) -- `FEAResult.fell_back` says when it did.
 - **Obstacles.** Fixed bodies a part rides in the wake of -- the car in front
   of a hitch box -- shelter it without being scored or moved, in the drag
   model, `FlowStudy` and `ParametricStudy`.
