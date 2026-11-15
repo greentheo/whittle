@@ -14,16 +14,18 @@ trying to be.
 * **Hard-kill material.** A voxel is either the part's material or nothing.
   Material that is not connected to a support carries no load and is dropped
   before the solve; it would only make the system singular.
-* **Matrix-free conjugate gradients**, element by element, Jacobi-preconditioned.
-  No global stiffness matrix is ever assembled. A direct sparse factorization
-  of the same system is exact, and on a 60x30x20 grid it takes minutes where
-  this takes seconds -- the fill-in of a 3D factorization is the whole cost.
-  Jacobi is the weak point: a slender part needs several hundred iterations.
-  Two cheaper fixes were measured and do not work -- starting from the
-  previous design's displacement saves nothing, because removing even 2% of
-  the voxels leaves a residual as large as starting from zero, and an
-  incomplete-LU preconditioner makes CG diverge. The fix that would work is
-  geometric multigrid (ROADMAP.md).
+* **Matrix-free conjugate gradients**, element by element, preconditioned by
+  geometric multigrid (:mod:`.multigrid`). No global stiffness matrix is ever
+  assembled. A direct sparse factorization of the same system is exact, and
+  on a 60x30x20 grid it takes minutes where this takes seconds -- the fill-in
+  of a 3D factorization is the whole cost. Preconditioned by its diagonal
+  alone (``preconditioner="jacobi"``, still there), CG needs several hundred
+  to a few thousand iterations on a slender part, more the longer it is in
+  voxels; multigrid holds it to tens at any size. Two cheaper fixes were
+  measured first and do not work -- starting from the previous design's
+  displacement saves nothing, because removing even 2% of the voxels leaves a
+  residual as large as starting from zero, and an incomplete-LU
+  preconditioner makes CG diverge.
 
 Units are whatever the inputs are, consistently. With millimetres, newtons
 and moduli in MPa, displacements come out in millimetres and stresses in MPa,
@@ -41,6 +43,11 @@ from scipy import ndimage
 from scipy.sparse.linalg import LinearOperator, cg
 
 from ..types import BoolArray, FloatArray, IntArray, Vector3
+from .multigrid import PATIENCE, Multigrid
+
+#: How CG is preconditioned: ``"multigrid"`` (see :mod:`.multigrid`) or ``"jacobi"``, the
+#: inverse diagonal -- simpler, and a few times more iterations on anything slender.
+PRECONDITIONERS = ("multigrid", "jacobi")
 
 
 @dataclass(frozen=True)
@@ -252,6 +259,7 @@ class VoxelFEA:
         loads: Sequence[Load | FieldLoad],
         supports: Sequence[Support],
         stiffness: FloatArray | None = None,
+        preconditioner: str = "multigrid",
     ) -> None:
         if not loads:
             raise ValueError("need at least one load")
@@ -263,6 +271,8 @@ class VoxelFEA:
         #: A part of two materials: each voxel's stiffness as a multiple of ``material``'s (a plywood top on
         #: printed sides). ``None`` is one material throughout. Stress follows each voxel's own stiffness.
         self.stiffness = self._check_stiffness(stiffness)
+        #: How CG is preconditioned, one of :data:`PRECONDITIONERS`. :meth:`solve` can override it.
+        self.preconditioner = _check_preconditioner(preconditioner)
         self.loads = list(loads)
         self.supports = list(supports)
         for load in self.loads:
@@ -361,13 +371,17 @@ class VoxelFEA:
         stiffness: FloatArray | None = None,
         rtol: float = 1e-5,
         maxiter: int = 20_000,
+        preconditioner: str | None = None,
     ) -> FEAResult:
         """Solve for the displacement of the part made of ``solid`` voxels.
 
-        ``stiffness`` (each voxel's, as a multiple of the material's) overrides the one this solver was made
-        with, for this solve.
+        ``stiffness`` (each voxel's, as a multiple of the material's) and ``preconditioner``
+        override the ones this solver was made with, for this solve.
         """
         solid = np.asarray(solid, dtype=bool)
+        method = self.preconditioner
+        if preconditioner is not None:
+            method = _check_preconditioner(preconditioner)
         scaled = self.stiffness if stiffness is None else self._check_stiffness(stiffness)
         if solid.shape != self.shape:
             raise ValueError(f"solid must have shape {self.shape}, got {solid.shape}")
@@ -386,26 +400,33 @@ class VoxelFEA:
         free = np.flatnonzero(active & ~self._fixed)
         if not len(free):
             return self._unsupported(kept)
-        n_dof = self.n_dof
+        n_free = len(free)
         ke = self._ke
         scale = None if scaled is None else scaled.ravel()[elements]
+        # Each element's DOFs numbered as CG's unknowns, with every held one sent to a
+        # spare slot at the end that is zero going in and dropped coming out. Working
+        # over the unknowns alone, rather than every DOF of the grid's bounding box,
+        # is most of the matvec's speed on a part that fills little of its box.
+        unknown = np.full(self.n_dof, n_free, dtype=np.int64)
+        unknown[free] = np.arange(n_free)
+        local = unknown[edof]
+        slots = local.ravel()
 
         def matvec(x: FloatArray) -> FloatArray:
-            full = np.zeros(n_dof, dtype=np.float64)
-            full[free] = x
-            product = full[edof] @ ke
+            full = np.empty(n_free + 1, dtype=np.float64)
+            full[:n_free] = x
+            full[n_free] = 0.0
+            product = full[local] @ ke
             if scale is not None:
                 product *= scale[:, None]
-            y = np.bincount(flat, weights=product.ravel(), minlength=n_dof)
-            result: FloatArray = y[free].astype(np.float64, copy=False)
+            summed = np.bincount(slots, weights=product.ravel(), minlength=n_free + 1)
+            result: FloatArray = summed[:n_free].astype(np.float64, copy=False)
             return result
 
         weights = np.tile(self._ke_diag, len(elements))
         if scale is not None:
             weights = weights * np.repeat(scale, 24)
-        diagonal = np.bincount(flat, weights=weights, minlength=n_dof)
-        diagonal = diagonal.astype(np.float64, copy=False)
-        inverse_diagonal = 1.0 / diagonal[free]
+        inverse_diagonal = 1.0 / np.bincount(slots, weights=weights, minlength=n_free + 1)[:n_free]
 
         def precondition(r: FloatArray) -> FloatArray:
             result: FloatArray = r * inverse_diagonal
@@ -414,6 +435,13 @@ class VoxelFEA:
         size = (len(free), len(free))
         operator = LinearOperator(size, matvec=matvec, dtype=np.float64)
         jacobi = LinearOperator(size, matvec=precondition, dtype=np.float64)
+        preconditioned, patience = jacobi, maxiter
+        if method == "multigrid":
+            coords = np.stack(np.unravel_index(elements, self.shape), axis=1)
+            held = self._fixed[edof]
+            grids = Multigrid(self.shape, coords, ke, scale, held, free, matvec, inverse_diagonal)
+            preconditioned = LinearOperator(size, matvec=grids.cycle, dtype=np.float64)
+            patience = min(maxiter, PATIENCE)
         iterations = 0
 
         def count(_: FloatArray) -> None:
@@ -431,10 +459,16 @@ class VoxelFEA:
         # and stress is the worst any case puts on a voxel.
         for force in self.forces:
             u_free, info = cg(
-                operator, force[free], rtol=rtol, maxiter=maxiter, M=jacobi, callback=count
+                operator, force[free], rtol=rtol, maxiter=patience, M=preconditioned, callback=count
             )
+            if info != 0 and preconditioned is not jacobi:
+                # Multigrid converges in tens of iterations or has met a part it cannot
+                # help with; the plain solve is slow but always gets there.
+                u_free, info = cg(
+                    operator, force[free], rtol=rtol, maxiter=maxiter, M=jacobi, callback=count
+                )
             converged &= info == 0
-            u = np.zeros(n_dof, dtype=np.float64)
+            u = np.zeros(self.n_dof, dtype=np.float64)
             u[free] = u_free
             ue = u[edof]
             element_energy = 0.5 * np.einsum("ij,ij->i", ue @ ke, ue)
@@ -514,6 +548,12 @@ class VoxelFEA:
             max_displacement=float("inf"),
             case_compliance=tuple(float("inf") for _ in self.cases),
         )
+
+
+def _check_preconditioner(name: str) -> str:
+    if name not in PRECONDITIONERS:
+        raise ValueError(f"preconditioner must be one of {PRECONDITIONERS}, got {name!r}")
+    return name
 
 
 def _resolve(spec: str | Material) -> Material:

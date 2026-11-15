@@ -154,7 +154,7 @@ as long as it keeps the outer skin, never does. So the study nests them:
 3. fill in more shapes wherever neighbouring ones differ most.
 
 Each lightening run yields its whole column of designs at once, so a map of
-five shapes by five weights is five carves and five lightening runs: about
+five shapes by five weights is five carves and five lightening runs: under
 two minutes for the 2 m foam pod in `examples/05_dual_roof_box.py`.
 
 ```python
@@ -364,10 +364,12 @@ plates at the two corners meet, and the study says to cut each side as one.
 ## How far to trust it
 
 **Structure -- validated.** Eight-node hexahedra, one per voxel, solved by
-matrix-free conjugate gradients. Against beam theory, a voxel cantilever's tip
-deflection comes out within 1-4%; its peak stress (the 99th percentile, kept a
-voxel clear of the clamp and load) within 10-15% low. Tests hold both. The
-honest gaps are in the inputs, not the solver:
+matrix-free conjugate gradients with a geometric multigrid preconditioner,
+which changes how fast the answer comes and not the answer: it matches the
+old Jacobi-preconditioned solve to 1e-8. Against beam theory, a voxel
+cantilever's tip deflection comes out within 1-4%; its peak stress (the 99th
+percentile, kept a voxel clear of the clamp and load) within 10-15% low.
+Tests hold both. The honest gaps are in the inputs, not the solver:
 
 - **Printed parts are not isotropic.** The materials table assumes 100% infill
   loaded along the layers. Across layers a print can be half as strong; at
@@ -456,7 +458,7 @@ can replace scipy's engine without touching anything else.
 
 ## Status
 
-**Works, tested (188 tests, ~61 s), runs today**
+**Works, tested (199 tests, ~60 s), runs today**
 
 - `FrameStudy` -- size the tubes of a welded frame: stress, buckling,
   deflection and what the supports hold, from a catalog of real tube
@@ -473,8 +475,9 @@ can replace scipy's engine without touching anything else.
 - Load cases and distributed loads in the FEA (`Load(case=...)`, `FieldLoad`)
 - `LoadStudy`, `FlowStudy`, `Sweep` -- the part-in, slider-out workflow;
   a flow study carves the part as sent, so its first station is the part
-- `VoxelFEA` -- linear-elastic hex FEA, matrix-free CG, stress and safety
-  factor, floating material dropped, broken load paths reported
+- `VoxelFEA` -- linear-elastic hex FEA, matrix-free CG with multigrid,
+  stress and safety factor, floating material dropped, broken load paths
+  reported
 - `beso` -- bi-directional evolutionary structural optimization with stations
 - `DragModel` -- the drag estimate above, with a per-face breakdown of where
   the drag comes from
@@ -490,10 +493,6 @@ can replace scipy's engine without touching anything else.
 
 **Not yet**
 
-- Speed on fine grids. Jacobi-preconditioned CG needs hundreds of iterations
-  on a slender part; a structural sweep is about 30 s at the default
-  resolution (48 voxels along the longest side) and 86 s at 60. Multigrid is
-  the fix.
 - A real flow solver to check the drag model against.
 
 ## Install
@@ -516,13 +515,13 @@ Times measured on one core of an M4 laptop. Everything is written to `out/`.
 | | what it shows | time |
 |---|---|---|
 | `01_bridge.py` | population search on a density field, with the geometric proxy -- and the thread-thin result that proxy produces | 10 s |
-| `02_shelf_bracket.py` | `LoadStudy`: a solid bracket whittled to a truss, table above | 31 s |
+| `02_shelf_bracket.py` | `LoadStudy`: a solid bracket whittled to a truss, table above | 12 s |
 | `03_roof_box.py` | `FlowStudy`: a square 2 m roof box carved around a protected cargo block | 91 s |
 | `04_roof_bar.py` | `FlowStudy(extruded=...)`: a rectangular rack bar reshaped, as a 2D section | 42 s |
-| `05_dual_roof_box.py` | `DualStudy`: a 2 m foam pod on two bars with 50 kg of cargo, carved and lightened together | 129 s |
+| `05_dual_roof_box.py` | `DualStudy`: a 2 m foam pod on two bars with 50 kg of cargo, carved and lightened together | 106 s |
 | `06_parametric_hitch_box.py` | `ParametricStudy`: five dimensions of a lofted hitch box, tuned in free air and behind the car (`obstacles=`) | 200 s |
 | `07_hitch_frame.py` | `FrameStudy`: the steel tube frame of a hitch cargo platform, sized for bumps | 1 s |
-| `08_hitch_gussets.py` | `FrameStudy.gusset()`: 3/16" plates for both corners of that frame's riser, as DXF and SVG | 8 s |
+| `08_hitch_gussets.py` | `FrameStudy.gusset()`: 3/16" plates for both corners of that frame's riser, as DXF and SVG | 4 s |
 
 The roof box, for a taste of the flow side:
 
@@ -549,8 +548,8 @@ started it at 0.80 -- the carved end lands at the same 35 N either way.
 
 ## Where this is going
 
-`ROADMAP.md`. The short version: multigrid to make finer grids fast, then a
-real flow solve to check the drag model's picks against.
+`ROADMAP.md`. The short version: a real flow solve to check the drag
+model's picks against.
 
 ---
 

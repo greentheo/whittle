@@ -63,6 +63,14 @@ In build order.
   than it can cut, a rim, a margin along the welds -- out as R12 DXF and SVG.
   `FrameStudy.gusset()` sets cheek plates up at a joint, loaded from the
   frame, and says how much of the joint's moment they take off its weld.
+- **Multigrid preconditioning** (was item 1). The structural solve's CG is
+  preconditioned by a geometric multigrid V-cycle on the voxel grid: coarsen
+  by two per level, Galerkin coarse operators built element by element (held
+  DOFs struck out of the children that touch a support), Chebyshev smoothing,
+  a direct solve at the bottom. Jacobi's 800-7,000 iterations on slender
+  test parts become 8-24, from 30k voxels to 400k alike -- 17-56x faster
+  from 150k up, with the same answer to 1e-8. Jacobi stays, as
+  `preconditioner="jacobi"`.
 - **Obstacles.** Fixed bodies a part rides in the wake of -- the car in front
   of a hitch box -- shelter it without being scored or moved, in the drag
   model, `FlowStudy` and `ParametricStudy`.
@@ -84,16 +92,7 @@ against 578 from zero -- because removing even 2% of the voxels leaves a
 residual as large as the load itself. An incomplete-LU preconditioner was also
 tried; CG diverges under it, since ILU of this system is not positive definite.
 
-## 1. Multigrid preconditioning
-
-The structural solve's real cost. Jacobi-preconditioned CG needs 300-1000
-iterations on a slender part, so a sweep is about 30 s at 48 voxels along the
-longest side and 86 s at 60, and the gap widens with every step up. Geometric
-multigrid on the voxel grid -- coarsen by two per level, Galerkin coarse
-operators, a smoother on each -- is the standard fix in topology optimization
-and should make iteration counts nearly independent of resolution.
-
-## 2. A real flow check
+## 1. A real flow check
 
 The drag model ranks shapes; something should check its rankings.
 
@@ -106,7 +105,7 @@ The drag model ranks shapes; something should check its rankings.
 
 Either is also the way to recalibrate the drag model if the rankings disagree.
 
-## 3. Pareto search instead of a weighted sum
+## 2. Pareto search instead of a weighted sum
 
 A sweep is already a hand-built trade-off curve: removal on one axis,
 stiffness or drag on the other. A proper multi-objective method (NSGA-II)
@@ -114,7 +113,7 @@ would find the front in one run, and could add a third axis -- printability,
 say -- that the sweep cannot. This is where EML's multi-objective work is
 most directly reusable.
 
-## 4. Manufacturing constraints as first-class objectives
+## 3. Manufacturing constraints as first-class objectives
 
 The real reason to keep a population method around.
 
@@ -123,13 +122,15 @@ The real reason to keep a population method around.
 - Tool reach for subtractive manufacturing
 - Snapping internal structure to a catalogue of lattice cells
 
-## 5. Parallel evaluation
+## 4. Parallel evaluation
 
 A flow station runs ten thousand independent drag evaluations; scipy's
 `workers=` passes straight through `evolve()` and has not been profiled. BESO
-is sequential by nature, so the structural side waits on item 1 instead.
+is sequential by nature. Within one structural solve, spreading the element
+loop over threads was measured at 1.5x -- the scatter holds the GIL -- and
+left for now: separate solves in separate processes scale better.
 
-## 6. Open structures in the wind
+## 5. Open structures in the wind
 
 `DualStudy` keeps the outer skin, which is what makes its coupling one-way:
 lightening never changes the outside, so it never changes the drag. An open
