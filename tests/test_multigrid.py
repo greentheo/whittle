@@ -228,8 +228,35 @@ def test_a_cycle_that_does_not_help_falls_back_on_jacobi(monkeypatch: pytest.Mon
     # A cycle that points the wrong way: CG under it gets nowhere.
     monkeypatch.setattr(mg.Multigrid, "cycle", lambda self, b, depth=0: -b)
     monkeypatch.setattr(mg, "PATIENCE", 20)
-    monkeypatch.setattr("whittle.physics.fea.PATIENCE", 20)
     rescued = fea.solve(kept, rtol=1e-10)
-    assert rescued.converged and rescued.iterations > jacobi.iterations
+    assert rescued.converged and rescued.fell_back
+    assert rescued.fallback_iterations == jacobi.iterations
+    assert rescued.iterations == 20 + jacobi.iterations
     scale = np.abs(jacobi.displacement).max()
     assert np.allclose(rescued.displacement, jacobi.displacement, atol=1e-8 * scale)
+
+
+def test_a_result_says_when_jacobi_had_to_finish_the_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Caliper's timings read this to explain a slow case. One iteration is never enough
+    # for the real cycle on this beam, so every load case falls back.
+    shape = (60, 4, 6)
+    clamp = np.zeros(shape, dtype=bool)
+    clamp[0] = True
+    tip = np.zeros(shape, dtype=bool)
+    tip[-1] = True
+    fea = VoxelFEA(
+        shape,
+        loads=[Load(tip, (0.0, 0.0, -10.0)), Load(tip, (0.0, 5.0, 0.0), case=1)],
+        supports=[Support(clamp)],
+    )
+    solid = np.ones(shape, dtype=bool)
+    usual = fea.solve(solid)
+    assert not usual.fell_back and usual.fallback_iterations == 0
+    jacobi = fea.solve(solid, preconditioner="jacobi")
+    assert not jacobi.fell_back and jacobi.fallback_iterations == 0
+    monkeypatch.setattr(mg, "PATIENCE", 1)
+    impatient = fea.solve(solid)
+    assert impatient.converged and impatient.fell_back
+    assert impatient.iterations == 2 + impatient.fallback_iterations  # one wasted per case
+    assert impatient.fallback_iterations > 10 * usual.iterations
+    assert impatient.case_compliance == pytest.approx(usual.case_compliance, rel=1e-5)

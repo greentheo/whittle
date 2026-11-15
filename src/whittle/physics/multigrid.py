@@ -63,7 +63,8 @@ DEGREE = 2
 SPECTRUM = (0.2, 1.1)
 #: Power steps estimating each level's largest eigenvalue.
 POWER_STEPS = 12
-#: CG iterations a multigrid-preconditioned solve gets before it is done again with Jacobi.
+#: CG iterations a multigrid-preconditioned load case gets before it is done again with
+#: Jacobi (and :attr:`~whittle.physics.fea.FEAResult.fell_back` says so).
 PATIENCE = 250
 
 

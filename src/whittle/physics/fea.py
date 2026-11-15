@@ -43,7 +43,7 @@ from scipy import ndimage
 from scipy.sparse.linalg import LinearOperator, cg
 
 from ..types import BoolArray, FloatArray, IntArray, Vector3
-from .multigrid import PATIENCE, Multigrid
+from . import multigrid
 
 #: How CG is preconditioned: ``"multigrid"`` (see :mod:`.multigrid`) or ``"jacobi"``, the
 #: inverse diagonal -- simpler, and a few times more iterations on anything slender.
@@ -186,6 +186,11 @@ class FEAResult:
     max_displacement: float = float("inf")
     #: Compliance of each load case on its own; ``compliance`` is their sum.
     case_compliance: tuple[float, ...] = ()
+    #: Whether multigrid gave up on a load case -- after :data:`.multigrid.PATIENCE`
+    #: iterations -- and Jacobi solved it instead. What makes a solve slow, when one is.
+    fell_back: bool = False
+    #: Of ``iterations``, how many were Jacobi's, after multigrid gave up.
+    fallback_iterations: int = 0
 
 
 # Corner order of a hex element: x varies fastest, then y, then z.
@@ -439,9 +444,11 @@ class VoxelFEA:
         if method == "multigrid":
             coords = np.stack(np.unravel_index(elements, self.shape), axis=1)
             held = self._fixed[edof]
-            grids = Multigrid(self.shape, coords, ke, scale, held, free, matvec, inverse_diagonal)
+            grids = multigrid.Multigrid(
+                self.shape, coords, ke, scale, held, free, matvec, inverse_diagonal
+            )
             preconditioned = LinearOperator(size, matvec=grids.cycle, dtype=np.float64)
-            patience = min(maxiter, PATIENCE)
+            patience = min(maxiter, multigrid.PATIENCE)
         iterations = 0
 
         def count(_: FloatArray) -> None:
@@ -453,6 +460,7 @@ class VoxelFEA:
         compliances: list[float] = []
         largest = 0.0
         converged = True
+        fell_back, fallback_iterations = False, 0
         first: FloatArray | None = None
         # Each load case is its own solve. The design is judged on all of them:
         # strain energy adds up, so material that works in either case is kept,
@@ -464,9 +472,12 @@ class VoxelFEA:
             if info != 0 and preconditioned is not jacobi:
                 # Multigrid converges in tens of iterations or has met a part it cannot
                 # help with; the plain solve is slow but always gets there.
+                before = iterations
                 u_free, info = cg(
                     operator, force[free], rtol=rtol, maxiter=maxiter, M=jacobi, callback=count
                 )
+                fell_back = True
+                fallback_iterations += iterations - before
             converged &= info == 0
             u = np.zeros(self.n_dof, dtype=np.float64)
             u[free] = u_free
@@ -497,6 +508,8 @@ class VoxelFEA:
             iterations=iterations,
             max_displacement=largest,
             case_compliance=tuple(compliances),
+            fell_back=fell_back,
+            fallback_iterations=fallback_iterations,
         )
 
     @staticmethod
