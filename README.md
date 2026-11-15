@@ -364,12 +364,14 @@ plates at the two corners meet, and the study says to cut each side as one.
 ## How far to trust it
 
 **Structure -- validated.** Eight-node hexahedra, one per voxel, solved by
-matrix-free conjugate gradients with a geometric multigrid preconditioner,
-which changes how fast the answer comes and not the answer: it matches the
-old Jacobi-preconditioned solve to 1e-8. Against beam theory, a voxel
-cantilever's tip deflection comes out within 1-4%; its peak stress (the 99th
-percentile, kept a voxel clear of the clamp and load) within 10-15% low.
-Tests hold both. The honest gaps are in the inputs, not the solver:
+matrix-free conjugate gradients with a geometric multigrid preconditioner.
+That changes how fast the answer comes, not the answer: both it and the old
+Jacobi-preconditioned solve stop at the same residual tolerance, and agree
+well inside it -- to 2e-6 of the largest displacement or stress, or better,
+on every part measured. Against beam theory, a voxel cantilever's tip
+deflection comes out within 1-4%; its peak stress (the 99th percentile, kept
+a voxel clear of the clamp and load) within 10-15% low. Tests hold both. The
+honest gaps are in the inputs, not the solver:
 
 - **Printed parts are not isotropic.** The materials table assumes 100% infill
   loaded along the layers. Across layers a print can be half as strong; at

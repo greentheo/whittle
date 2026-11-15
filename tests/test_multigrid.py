@@ -95,6 +95,82 @@ def test_multigrid_gives_jacobis_answer_in_far_fewer_iterations() -> None:
     assert np.allclose(multigrid.von_mises, jacobi.von_mises, rtol=1e-5, atol=1e-8)
 
 
+def _beam(shape: tuple[int, int, int]) -> tuple[VoxelFEA, np.ndarray]:
+    clamp = np.zeros(shape, dtype=bool)
+    clamp[0] = True
+    tip = np.zeros(shape, dtype=bool)
+    tip[-1] = True
+    fea = VoxelFEA(shape, loads=[Load(tip, (0.0, 0.0, -10.0))], supports=[Support(clamp)])
+    return fea, np.ones(shape, dtype=bool)
+
+
+def _grids(fea: VoxelFEA, solid: np.ndarray, monkeypatch: pytest.MonkeyPatch) -> mg.Multigrid:
+    """The cycle a solve of ``solid`` builds."""
+    built: list[mg.Multigrid] = []
+    build = mg.Multigrid.__init__
+
+    def keep(self: mg.Multigrid, *args: object) -> None:
+        build(self, *args)  # type: ignore[arg-type]
+        built.append(self)
+
+    monkeypatch.setattr(mg.Multigrid, "__init__", keep)
+    fea.solve(solid, maxiter=1)
+    monkeypatch.setattr(mg.Multigrid, "__init__", build)
+    return built[0]
+
+
+def test_a_part_three_grids_deep_still_takes_few_iterations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The smallest part that reaches the assembled grids below the first coarse one.
+    # A transfer or smoother there that does nothing still gets the right answer --
+    # CG sees to that -- in twenty times the iterations, so only the count can tell.
+    fea, solid = _beam((300, 12, 16))
+    assert len(_grids(fea, solid, monkeypatch).sizes) >= 3
+    result = fea.solve(solid)
+    assert result.converged and result.iterations <= 20
+
+
+@pytest.mark.parametrize("part", ["beam", "awkward"])
+def test_the_cycle_is_symmetric_and_positive(part: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # CG needs its preconditioner symmetric positive definite: on every grid the
+    # restriction must be exactly the prolongation's transpose, and the smoothing
+    # the same on the way down as on the way up.
+    if part == "beam":
+        fea, solid = _beam((300, 12, 16))
+    else:
+        fea, solid = _awkward()
+        # Held DOFs, a roller and odd sizes, three grids down.
+        monkeypatch.setattr(mg, "COARSEST", 30)
+    grids = _grids(fea, solid, monkeypatch)
+    assert len(grids.sizes) >= 3
+    a, b = np.random.default_rng(3).standard_normal((2, grids.sizes[0]))
+    # To round-off: the beam's coarsest grid is factored by sparse LU, whose solve is
+    # symmetric only to its condition (3e7) times machine precision -- 4e-9 here. A
+    # restriction that isn't the prolongation's transpose is off by a tenth or more.
+    assert a @ grids.cycle(b) == pytest.approx(b @ grids.cycle(a), rel=1e-6)
+    assert a @ grids.cycle(a) > 0 and b @ grids.cycle(b) > 0
+
+
+@pytest.mark.parametrize("part", ["beam", "awkward"])
+def test_each_restriction_is_its_prolongations_transpose(
+    part: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Symmetry of the whole cycle cannot see a restriction off by a constant: R = P^T / 2
+    # just halves the coarse correction, which is still symmetric, and costs only a few
+    # iterations. So ask each grid directly: y . P x must be x . R y.
+    if part == "beam":
+        fea, solid = _beam((300, 12, 16))
+    else:
+        fea, solid = _awkward()
+        monkeypatch.setattr(mg, "COARSEST", 30)
+    grids = _grids(fea, solid, monkeypatch)
+    rng = np.random.default_rng(4)
+    for depth, level in enumerate(grids.levels):
+        x, y = rng.standard_normal(grids.sizes[depth + 1]), rng.standard_normal(grids.sizes[depth])
+        assert y @ level.prolong(x) == pytest.approx(x @ level.restrict(y), rel=1e-12)
+
+
 def test_the_awkward_part_solves_the_same_either_way() -> None:
     fea, kept = _awkward()
     jacobi = fea.solve(kept, preconditioner="jacobi", rtol=1e-10)
