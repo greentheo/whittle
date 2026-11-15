@@ -253,6 +253,7 @@ class LoadStudy:
         smooth: float = 0.6,
         relax: int = 8,
         skin: int = 1,
+        rtol: float = 1e-5,
         callback: Callable[[int, float, float], None] | None = None,
         progress: Callable[[float], None] | None = None,
     ) -> Sweep:
@@ -264,6 +265,9 @@ class LoadStudy:
 
         ``progress`` is called with the fraction of the run done, for a
         progress bar; raising from it abandons the run.
+
+        ``rtol`` is each solve's tolerance; see :func:`~whittle.optimize.beso.beso`.
+        The stations' own numbers come from the same solves.
 
         ``smooth`` and ``relax`` only shape the exported meshes, not what was
         analyzed: see :meth:`~whittle.voxel.Grid.mesh`. The defaults move the
@@ -292,6 +296,7 @@ class LoadStudy:
             keep=self.kept(skin=skin),
             evolution_rate=evolution_rate,
             filter_radius=filter_radius,
+            rtol=rtol,
             callback=report,
         )
         baseline = run.stations[0].result.compliance
