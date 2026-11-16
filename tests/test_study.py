@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pytest
 
-from whittle import FlowStudy, Grid, LoadStudy, Station, Sweep, shapes
+from whittle import FEAResult, FlowStudy, Grid, LoadStudy, Station, Sweep, VoxelFEA, shapes
 from whittle.optimize.beso import beso
 from whittle.sweep import Column
 from whittle.types import Mesh
@@ -284,3 +286,24 @@ def test_carving_only_named_surfaces_leaves_the_rest_exactly_in_place() -> None:
     moved = np.linalg.norm(sweep[-1].mesh.vertices - study.base.vertices, axis=1)
     assert moved[weights == 0].max() == 0.0
     assert moved[weights == 1].max() > 0.0
+
+
+@pytest.mark.parametrize("rtol", [None, 1e-3])
+def test_a_sweep_solves_to_the_tolerance_it_is_given(
+    rtol: float | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # BESO only ranks voxels, so caliper sweeps at 1e-3 and checks each station at 1e-5.
+    study = _shelf_bracket()
+    asked: list[float] = []
+    solve = VoxelFEA.solve
+
+    def spy(self: VoxelFEA, solid: np.ndarray, **kwargs: Any) -> FEAResult:
+        asked.append(kwargs.get("rtol", 1e-5))
+        return solve(self, solid, **kwargs)
+
+    monkeypatch.setattr(VoxelFEA, "solve", spy)
+    sweep = study.sweep(remove_up_to=0.2, stations=2) if rtol is None else study.sweep(
+        remove_up_to=0.2, stations=2, rtol=rtol
+    )
+    assert asked and set(asked) == {1e-5 if rtol is None else rtol}
+    assert sweep[-1].removed == pytest.approx(0.2, abs=0.02)

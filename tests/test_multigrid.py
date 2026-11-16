@@ -490,3 +490,70 @@ def test_a_bad_thread_count_is_refused(setting: str, monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("WHITTLE_CASE_THREADS", setting)
     with pytest.raises(ValueError, match="WHITTLE_CASE_THREADS"):
         module._case_threads()
+
+
+def test_each_grids_largest_eigenvalue_is_estimated_closely_and_never_over(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The smoothing interval is set from it. A dozen power steps came out 15-25% low --
+    # far enough to put the true value past the top of the interval -- so it is Lanczos.
+    fea, kept = _awkward()
+    monkeypatch.setattr(mg, "COARSEST", 30)
+    grids = _grids(fea, kept, monkeypatch)
+    for level in grids.levels:
+        n = len(level.inverse_diagonal)
+        scale = np.sqrt(level.inverse_diagonal)
+        dense = np.column_stack([scale * level.apply(scale * e) for e in np.eye(n)])
+        exact = np.linalg.eigvalsh((dense + dense.T) / 2)[-1]
+        assert 0.99 * exact <= level.largest <= exact * (1 + 1e-9)
+    # A space smaller than the steps: exact.
+    small = np.diag([1.0, 2.0, 5.0])
+    assert mg._largest(lambda x: small @ x, np.ones(3)) == pytest.approx(5.0, rel=1e-12)
+
+
+def test_the_largest_eigenvalue_of_a_long_beam_is_not_underestimated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The smoothing interval runs to 1.1x this estimate. #5 took it from a dozen power
+    # steps, 15-33% low on long beams and carved parts; Lanczos, as many steps, is within
+    # a percent. Checked against an eigensolver run to convergence.
+    from scipy.sparse.linalg import LinearOperator, eigsh
+
+    fea, solid = _beam((300, 12, 16))
+    fine = _grids(fea, solid, monkeypatch).levels[0]
+    scale = np.sqrt(fine.inverse_diagonal)
+    n = len(scale)
+    op = LinearOperator((n, n), matvec=lambda x: scale * fine.apply(scale * x), dtype=float)
+    exact = eigsh(op, k=1, which="LA", tol=1e-6, return_eigenvectors=False)[0]
+    assert 0.99 * exact <= fine.largest <= exact * (1 + 1e-9)
+
+
+def test_the_smoothing_interval_is_safe_only_with_an_estimate_that_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Down to a twentieth of the estimate, a degree-2 smoother damps only up to 1.15x
+    # the estimate. On this beam the old power-step estimate puts the true value past
+    # that, and CG under the cycle breaks down within a few steps; with Lanczos it
+    # converges in about ten.
+    fea, solid = _beam((300, 12, 16))
+    result = fea.solve(solid)
+    assert result.converged and not result.fell_back and result.iterations <= 20
+
+    def power_steps(apply: mg.Apply, inverse_diagonal: np.ndarray) -> float:
+        x = np.random.default_rng(0).standard_normal(len(inverse_diagonal))
+        estimate = 1.0
+        for _ in range(12):
+            kx = apply(x)
+            estimate = float(x @ kx) / float(x @ (x / inverse_diagonal))
+            x = inverse_diagonal * kx
+            x /= np.linalg.norm(x)
+        return estimate
+
+    monkeypatch.setattr(mg, "_largest", power_steps)
+    grids = _grids(fea, solid, monkeypatch)
+    elements = np.flatnonzero(solid.ravel())
+    active = np.zeros(fea.n_dof, dtype=bool)
+    active[fea._edof[elements].ravel()] = True
+    b = fea.forces[0][np.flatnonzero(active & ~fea._fixed)]
+    _, ending, used = mg.pcg(grids.levels[0].apply, grids.cycle, b, rtol=1e-5, maxiter=100)
+    assert ending == "broke down" and used < 20

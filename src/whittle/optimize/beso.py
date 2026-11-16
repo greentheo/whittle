@@ -57,6 +57,7 @@ def beso(
     filter_radius: float = 1.5,
     settle: int = 8,
     tol: float = 0.002,
+    rtol: float = 1e-5,
     callback: Callable[[int, float, float], None] | None = None,
 ) -> BesoRun:
     """Remove material from ``domain`` in steps, pausing at each of ``removals``.
@@ -70,6 +71,11 @@ def beso(
     ``filter_radius`` (in voxels) is the length scale of the result. Below
     about 1.5 the design breaks into checkerboards and one-voxel threads;
     larger values give fewer, thicker members.
+
+    ``rtol`` is each solve's tolerance (:meth:`VoxelFEA.solve`). BESO only ranks
+    voxels by strain energy, so it can do with less than a stress check does: at
+    1e-3 a carve of a 147k-voxel stool ran 1.36x faster with every station within
+    2% of the stiffness it had at 1e-5. Voxels that change are near-ties.
 
     ``callback(solve_count, removed, compliance)`` is called after every
     solve, for a progress bar.
@@ -101,7 +107,7 @@ def beso(
 
     def solve(solid: BoolArray) -> FEAResult:
         nonlocal solves
-        result = fea.solve(solid)
+        result = fea.solve(solid, rtol=rtol)
         solves += 1
         if callback is not None:
             callback(solves, 1.0 - int(solid.sum()) / n_domain, result.compliance)

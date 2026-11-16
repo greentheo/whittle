@@ -25,8 +25,8 @@ takes a slender part from hundreds of iterations to tens.
   fine ones gets a zero row, then a unit diagonal so it sits out. Coarse DOFs
   can also interpolate onto the same few free ones and leave the coarsest
   matrix singular, which is why it is factored with a small shift.
-* **Chebyshev smoothing**, degree two, between a fifth of and just past the
-  largest eigenvalue of ``D^-1 K``, which a few power steps estimate per level.
+* **Chebyshev smoothing**, degree two, from a twentieth of to just past the
+  largest eigenvalue of ``D^-1 K``, which a dozen Lanczos steps estimate per level.
   Unlike damped Jacobi it needs no damping factor that is right for one part
   and unstable for the next.
 
@@ -60,9 +60,9 @@ DENSE = 3000
 SHIFT = 1e-9
 #: Chebyshev degree of each smoothing pass, and the share of the spectrum it targets.
 DEGREE = 2
-SPECTRUM = (0.2, 1.1)
-#: Power steps estimating each level's largest eigenvalue.
-POWER_STEPS = 12
+SPECTRUM = (0.05, 1.1)
+#: Lanczos steps estimating each level's largest eigenvalue.
+LANCZOS_STEPS = 12
 #: When :func:`pcg` gives up on multigrid, and the load case is done again with Jacobi
 #: (which :attr:`~whittle.physics.fea.FEAResult.fell_back` reports): at once if the cycle
 #: breaks down, which every broken cycle measured did within a few iterations; when its
@@ -205,16 +205,32 @@ def _assemble(k: FloatArray, corners: IntArray) -> sparse.bsr_matrix:
 
 
 def _largest(apply: Apply, inverse_diagonal: FloatArray) -> float:
-    """Estimate the largest eigenvalue of ``D^-1 K`` by power steps."""
-    x = np.random.default_rng(0).standard_normal(len(inverse_diagonal))
-    estimate = 1.0
-    for _ in range(POWER_STEPS):
-        kx = apply(x)
-        # The Rayleigh quotient in D's inner product: never above the true value.
-        estimate = float(x @ kx) / float(x @ (x / inverse_diagonal))
-        x = inverse_diagonal * kx
-        x /= np.linalg.norm(x)
-    return estimate
+    """Estimate the largest eigenvalue of ``D^-1 K``: Lanczos on ``D^-1/2 K D^-1/2``.
+
+    A dozen steps land within a percent of it, and never over; a dozen power steps were
+    measured 7-33% low -- enough to put the true value past the top of the smoothing
+    interval, where the Chebyshev polynomial grows instead of damping.
+    """
+    scale = np.sqrt(inverse_diagonal)
+    q = np.random.default_rng(0).standard_normal(len(scale))
+    q /= np.linalg.norm(q)
+    previous = np.zeros_like(q)
+    alphas: list[float] = []
+    betas: list[float] = []
+    beta = 0.0
+    for _ in range(min(LANCZOS_STEPS, len(scale))):
+        w = scale * apply(scale * q)
+        alpha = float(q @ w)
+        w -= alpha * q + beta * previous
+        alphas.append(alpha)
+        beta = float(np.linalg.norm(w))
+        if beta <= 1e-12 * abs(alpha):
+            break  # the Krylov space is exhausted: what we have is exact
+        betas.append(beta)
+        previous, q = q, w / beta
+    off = np.array(betas[: len(alphas) - 1])
+    ritz = linalg.eigh_tridiagonal(np.array(alphas), off, eigvals_only=True)
+    return float(ritz[-1])
 
 
 def _chebyshev(
