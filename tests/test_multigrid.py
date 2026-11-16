@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+import threading
+from pathlib import Path
+
 import numpy as np
 import pytest
 from scipy import ndimage, sparse
 
+import whittle
 from whittle import Load, Support, VoxelFEA
 from whittle.physics import multigrid as mg
 
@@ -384,3 +391,102 @@ def test_a_result_says_when_jacobi_had_to_finish_the_job(monkeypatch: pytest.Mon
     assert impatient.iterations == 2 + impatient.fallback_iterations  # one wasted per case
     assert impatient.fallback_iterations > 10 * usual.iterations
     assert impatient.case_compliance == pytest.approx(usual.case_compliance, rel=1e-5)
+
+
+def _three_case_beam() -> tuple[VoxelFEA, np.ndarray]:
+    shape = (120, 6, 8)
+    clamp = np.zeros(shape, dtype=bool)
+    clamp[0] = True
+    tip = np.zeros(shape, dtype=bool)
+    tip[-1] = True
+    near = np.zeros(shape, dtype=bool)
+    near[8] = True
+    solid = np.ones(shape, dtype=bool)
+    solid[10:110:12, :, 2:6] = False
+    loads = [
+        Load(tip, (0.0, 0.0, -10.0)),
+        Load(tip, (0.0, 5.0, 0.0), case=1),
+        Load(near, (0.0, 0.0, -10.0), case=2),
+    ]
+    return VoxelFEA(shape, loads=loads, supports=[Support(clamp)]), solid
+
+
+def test_threads_never_change_an_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Over repeated runs and any number of threads: the same bits. Nothing is summed
+    # across cases, so there is no order for threads to change.
+    fea, solid = _three_case_beam()
+    results = []
+    for threads in (1, 2, 4, 4, 2):
+        monkeypatch.setattr("whittle.physics.fea.CASE_THREADS", threads)
+        results.append(fea.solve(solid))
+    first = results[0]
+    for other in results[1:]:
+        assert other.iterations == first.iterations
+        assert other.case_compliance == first.case_compliance
+        assert np.array_equal(other.displacement, first.displacement)
+        assert np.array_equal(other.strain_energy, first.strain_energy)
+        assert np.array_equal(other.von_mises, first.von_mises)
+
+
+def test_a_fallback_or_a_failure_on_a_thread_is_never_lost(monkeypatch: pytest.MonkeyPatch) -> None:
+    fea, solid = _three_case_beam()
+    monkeypatch.setattr(mg, "PATIENCE", 1)
+    monkeypatch.setattr("whittle.physics.fea.CASE_THREADS", 1)
+    serial = fea.solve(solid)
+    monkeypatch.setattr("whittle.physics.fea.CASE_THREADS", 3)
+    threaded = fea.solve(solid)
+    assert threaded.fell_back and serial.fell_back
+    assert threaded.fallback_iterations == serial.fallback_iterations > 0
+    assert threaded.iterations == serial.iterations
+
+    def boom(self: mg.Multigrid, b: np.ndarray, depth: int = 0) -> np.ndarray:
+        raise RuntimeError("the cycle failed")
+
+    monkeypatch.setattr(mg.Multigrid, "cycle", boom)
+    with pytest.raises(RuntimeError, match="the cycle failed"):
+        fea.solve(solid)
+
+
+@pytest.mark.parametrize(("setting", "threads"), [("1", 1), ("2", 2), (None, 4)])
+def test_case_threads_come_from_the_environment(setting: str | None, threads: int) -> None:
+    # As caliper will set it: in the environment, before whittle is imported.
+    env = {k: v for k, v in os.environ.items() if k != "WHITTLE_CASE_THREADS"}
+    if setting is not None:
+        env["WHITTLE_CASE_THREADS"] = setting
+    env["PYTHONPATH"] = str(Path(whittle.__file__).parents[1])
+    script = "from whittle.physics import fea; print(fea.CASE_THREADS)"
+    out = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert int(out.stdout) == threads
+
+
+@pytest.mark.parametrize(("setting", "cases", "most"), [(1, 3, 0), (2, 3, 2), (3, 3, 3), (4, 3, 3)])
+def test_cases_run_on_as_many_threads_as_allowed(
+    setting: int, cases: int, most: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fea, solid = _three_case_beam()
+    seen: list[threading.Thread] = []
+    pcg = mg.pcg
+
+    def spy(*args: object, **kwargs: object) -> tuple[np.ndarray, str, int]:
+        seen.append(threading.current_thread())
+        return pcg(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(mg, "pcg", spy)
+    monkeypatch.setattr("whittle.physics.fea.CASE_THREADS", setting)
+    fea.solve(solid)
+    assert len(seen) == cases
+    workers = {t for t in seen if t is not threading.main_thread()}
+    if most == 0:
+        assert not workers  # one at a time, on the caller's own thread
+    else:
+        assert len(workers) == most and threading.main_thread() not in seen
+
+
+@pytest.mark.parametrize("setting", ["0", "-2", "four", ""])
+def test_a_bad_thread_count_is_refused(setting: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    from whittle.physics import fea as module
+
+    monkeypatch.setenv("WHITTLE_CASE_THREADS", setting)
+    with pytest.raises(ValueError, match="WHITTLE_CASE_THREADS"):
+        module._case_threads()

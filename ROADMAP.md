@@ -73,7 +73,10 @@ In build order.
   (2e-6 or better, where Jacobi and multigrid stop at rtol 1e-5). Jacobi
   stays, as `preconditioner="jacobi"`, and takes over any load case where
   multigrid's cycle breaks down or its residual stalls for 200 iterations
-  (or that runs to 1,000) -- `FEAResult.fell_back` says when it did.
+  (or that runs to 1,000) -- `FEAResult.fell_back` says when it did. A
+  solve's load cases run on threads over the one hierarchy, bit-identical
+  to one after another and about 1.6x faster for three
+  (`WHITTLE_CASE_THREADS` caps it).
 - **Obstacles.** Fixed bodies a part rides in the wake of -- the car in front
   of a hitch box -- shelter it without being scored or moved, in the drag
   model, `FlowStudy` and `ParametricStudy`.
