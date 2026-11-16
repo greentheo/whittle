@@ -186,8 +186,9 @@ class FEAResult:
     max_displacement: float = float("inf")
     #: Compliance of each load case on its own; ``compliance`` is their sum.
     case_compliance: tuple[float, ...] = ()
-    #: Whether multigrid gave up on a load case -- after :data:`.multigrid.PATIENCE`
-    #: iterations -- and Jacobi solved it instead. What makes a solve slow, when one is.
+    #: Whether multigrid gave up on a load case -- its residual stalled, its cycle broke
+    #: down, or it took :data:`.multigrid.PATIENCE` iterations -- and Jacobi finished it.
+    #: What makes a solve slow, when one is.
     fell_back: bool = False
     #: Of ``iterations``, how many were Jacobi's, after multigrid gave up.
     fallback_iterations: int = 0
@@ -440,15 +441,13 @@ class VoxelFEA:
         size = (len(free), len(free))
         operator = LinearOperator(size, matvec=matvec, dtype=np.float64)
         jacobi = LinearOperator(size, matvec=precondition, dtype=np.float64)
-        preconditioned, patience = jacobi, maxiter
+        grids: multigrid.Multigrid | None = None
         if method == "multigrid":
             coords = np.stack(np.unravel_index(elements, self.shape), axis=1)
             held = self._fixed[edof]
             grids = multigrid.Multigrid(
                 self.shape, coords, ke, scale, held, free, matvec, inverse_diagonal
             )
-            preconditioned = LinearOperator(size, matvec=grids.cycle, dtype=np.float64)
-            patience = min(maxiter, multigrid.PATIENCE)
         iterations = 0
 
         def count(_: FloatArray) -> None:
@@ -466,16 +465,23 @@ class VoxelFEA:
         # strain energy adds up, so material that works in either case is kept,
         # and stress is the worst any case puts on a voxel.
         for force in self.forces:
-            u_free, info = cg(
-                operator, force[free], rtol=rtol, maxiter=patience, M=preconditioned, callback=count
-            )
-            if info != 0 and preconditioned is not jacobi:
-                # Multigrid converges in tens of iterations or has met a part it cannot
-                # help with; the plain solve is slow but always gets there.
-                before = iterations
-                u_free, info = cg(
-                    operator, force[free], rtol=rtol, maxiter=maxiter, M=jacobi, callback=count
+            b = force[free]
+            if grids is None:
+                u_free, info = cg(operator, b, rtol=rtol, maxiter=maxiter, M=jacobi, callback=count)
+            else:
+                patience = min(maxiter, multigrid.PATIENCE)
+                u_free, ending, used = multigrid.pcg(
+                    matvec, grids.cycle, b, rtol=rtol, maxiter=patience
                 )
+                iterations += used
+                info = 0 if ending == "converged" else 1
+            if grids is not None and info != 0:
+                # Multigrid has met a part it cannot help with: the cycle broke down, its
+                # residual stopped falling, or it ran out of patience. The plain solve is
+                # slow but always gets there. From zero: what multigrid leaves behind is the
+                # error it could not reduce, and Jacobi does worse from there than afresh.
+                before = iterations
+                u_free, info = cg(operator, b, rtol=rtol, maxiter=maxiter, M=jacobi, callback=count)
                 fell_back = True
                 fallback_iterations += iterations - before
             converged &= info == 0

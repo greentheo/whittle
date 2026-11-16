@@ -32,8 +32,8 @@ takes a slender part from hundreds of iterations to tens.
 
 The cycle is a fixed symmetric operator -- same smoothing before and after,
 one solve at the bottom -- which is what CG needs of a preconditioner. Should
-a part ever defeat it, :class:`~whittle.physics.fea.VoxelFEA` gives up on it
-after :data:`PATIENCE` iterations and solves that case with Jacobi.
+a part ever defeat it -- CG's residual stops falling -- :class:`~whittle.physics.fea.VoxelFEA`
+gives up on it (:data:`STALL`) and solves that case with Jacobi.
 """
 
 from __future__ import annotations
@@ -63,9 +63,18 @@ DEGREE = 2
 SPECTRUM = (0.2, 1.1)
 #: Power steps estimating each level's largest eigenvalue.
 POWER_STEPS = 12
-#: CG iterations a multigrid-preconditioned load case gets before it is done again with
-#: Jacobi (and :attr:`~whittle.physics.fea.FEAResult.fell_back` says so).
-PATIENCE = 250
+#: When :func:`pcg` gives up on multigrid, and the load case is done again with Jacobi
+#: (which :attr:`~whittle.physics.fea.FEAResult.fell_back` reports): at once if the cycle
+#: breaks down, which every broken cycle measured did within a few iterations; when its
+#: best residual has fallen by less than a tenth over the last ``STALL`` iterations; or
+#: after ``PATIENCE`` iterations, past which Jacobi would have been cheaper anyway. Jacobi
+#: then starts from zero, not from multigrid's iterate: what multigrid leaves is error it
+#: could not reduce, which was measured to cost Jacobi more than starting afresh.
+#: Healthy solves of carved BESO designs fall by 2.3x or more in every 100 iterations;
+#: a slow but steady one can sit flat for 100, never for 200.
+STALL = 200
+STALL_PROGRESS = 0.9
+PATIENCE = 1000
 
 
 @lru_cache(maxsize=64)
@@ -226,6 +235,61 @@ def _chebyshev(
         rho = rho_next
         x = x + d
     return x
+
+
+def pcg(
+    apply: Apply, cycle: Apply, b: FloatArray, *, rtol: float, maxiter: int
+) -> tuple[FloatArray, str, int]:
+    """CG on ``K x = b`` from zero, preconditioned by ``cycle``, watching for a stall.
+
+    It stops where scipy's ``cg`` does, once ``|r| <= rtol |b|``. Returns the iterate, how
+    the solve ended -- ``"converged"``, ``"stalled"`` (see :data:`STALL`), ``"broke down"``
+    (the cycle or ``K`` was not positive along a direction, so the iterate is not to be
+    trusted) or ``"out of iterations"`` -- and the iterations it took.
+    """
+    x = np.zeros_like(b)
+    r = b.copy()
+    target = rtol * float(np.linalg.norm(b))
+    if float(np.linalg.norm(r)) <= target:
+        return x, "converged", 0
+    z = cycle(r)
+    rz = float(r @ z)
+    if not rz > 0:
+        return x, "broke down", 0
+    p = z
+    norms = [float(np.linalg.norm(r))]
+    for iteration in range(1, maxiter + 1):
+        q = apply(p)
+        pq = float(p @ q)
+        if not pq > 0:
+            return x, "broke down", iteration - 1
+        step = rz / pq
+        x += step * p
+        r -= step * q
+        norm = float(np.linalg.norm(r))
+        if norm <= target:
+            return x, "converged", iteration
+        norms.append(norm)
+        if _stalled(norms):
+            return x, "stalled", iteration
+        z = cycle(r)
+        rz_next = float(r @ z)
+        if not rz_next > 0:
+            return x, "broke down", iteration
+        p = z + (rz_next / rz) * p
+        rz = rz_next
+    return x, "out of iterations", maxiter
+
+
+def _stalled(norms: list[float]) -> bool:
+    """Whether a solve whose residual has gone ``norms`` (from the start) has stopped improving.
+
+    Judged on the best residual so far, not the latest: CG's residual need not fall every
+    step, and on a slender part can sit well above its best for a long while.
+    """
+    if len(norms) <= STALL:
+        return False
+    return min(norms) > STALL_PROGRESS * min(norms[:-STALL])
 
 
 @dataclass
