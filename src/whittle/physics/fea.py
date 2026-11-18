@@ -65,10 +65,27 @@ def _case_threads() -> int:
 
 
 #: Load cases a multigrid solve works on at once, each its own CG on its own thread over
-#: the one shared hierarchy, which they only read. Each case's answer is exactly what it
-#: gets alone, bit for bit; three cases finish in under half the time. 1 solves them one
-#: after another. Set from the ``WHITTLE_CASE_THREADS`` environment variable, default 4.
+#: the one shared hierarchy, which they only read. 1 solves them one after another. Set from
+#: the ``WHITTLE_CASE_THREADS`` environment variable, default 4.
+#:
+#: Each case's answer is exactly what it gets alone, bit for bit, **with single-threaded BLAS,
+#: or one solve at a time in the process**. With a threaded OpenMP OpenBLAS, solves running
+#: at once in one process can come back wrong while saying they converged (reviewer-2, on
+#: #9: a residual of 0.6 against an rtol of 1e-5, a stress off by 39%, and so before this
+#: too). So the cases go on threads only where BLAS is single-threaded (:func:`_blas_single`);
+#: otherwise one after another. Set ``OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1`` before numpy
+#: is imported, in any process that solves more than one thing at once.
 CASE_THREADS = _case_threads()
+
+
+def _blas_single() -> bool:
+    """Whether BLAS runs on one thread here: every thread pool threadpoolctl finds, or, where
+    it isn't installed, ``OMP_NUM_THREADS`` and ``OPENBLAS_NUM_THREADS`` both set to 1."""
+    try:
+        from threadpoolctl import threadpool_info  # type: ignore[import-untyped]
+    except ImportError:
+        return all(os.environ.get(k) == "1" for k in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS"))
+    return all(int(pool.get("num_threads", 1)) == 1 for pool in threadpool_info())
 
 
 @dataclass(frozen=True)
@@ -438,8 +455,11 @@ class VoxelFEA:
         ``stiffness`` (each voxel's, as a multiple of the material's) and ``preconditioner``
         override the ones this solver was made with, for this solve.
         """
-        ready = self._prepare(solid, stiffness, preconditioner)
-        if not all(self._reaches(load, ready.kept) for load in self.loads) or ready.free is None:
+        ready = self._prepare(
+            solid, stiffness, preconditioner,
+            wanted=lambda kept: all(self._reaches(load, kept) for load in self.loads),
+        )
+        if ready.free is None:
             return self._unsupported(ready.kept)
         iterations = 0
         energy = np.zeros(int(np.prod(self.shape)), dtype=np.float64)
@@ -493,24 +513,30 @@ class VoxelFEA:
     ) -> list[FEAResult]:
         """Each load case judged on its own: one result a case, in case order.
 
-        Each is what a solver made with that case's loads alone gives, bit for bit: its
-        own displacement, stress, peak (away from its own loads' attachments and the
-        supports), deflection, compliance and whether it's supported. The set-up they
-        share -- the operator and the multigrid hierarchy, most of a small solve's time
-        -- is built once, and the cases are solved on threads as :meth:`solve` does.
+        Each is what a solver made with that case's loads alone gives, bit for bit, with
+        single-threaded BLAS or one solve at a time in the process (see
+        :data:`CASE_THREADS`): its own displacement, stress, peak (away from its own loads'
+        attachments and the supports), deflection, compliance and whether it's supported.
+        The set-up they share -- the operator and the multigrid hierarchy, most of a small
+        solve's time -- is built once, and only where some case is supported. The cases are
+        solved on threads as :meth:`solve` does.
         """
-        ready = self._prepare(solid, stiffness, preconditioner)
+        groups = [[load for load in self.loads if load.case == case] for case in self.cases]
+        ready = self._prepare(
+            solid, stiffness, preconditioner,
+            wanted=lambda kept: any(all(self._reaches(ld, kept) for ld in mine) for mine in groups),
+        )
         nx, ny, nz = self.shape
         out: list[FEAResult | None] = []
         live = []
-        for index, case in enumerate(self.cases):
-            mine = [load for load in self.loads if load.case == case]
+        for index, mine in enumerate(groups):
             if ready.free is None or not all(self._reaches(load, ready.kept) for load in mine):
                 out.append(self._unsupported(ready.kept, cases=1))
             else:
                 out.append(None)
                 live.append(index)
-        for index, solved in zip(live, self._solved(ready, live, rtol, maxiter), strict=True):
+        solves = self._solved(ready, live, rtol, maxiter) if live else []
+        for index, solved in zip(live, solves, strict=True):
             vm = np.zeros(int(np.prod(self.shape)), dtype=np.float64)
             vm[ready.elements] = np.maximum(vm[ready.elements], solved.stress)
             energy = np.zeros_like(vm)
@@ -536,10 +562,17 @@ class VoxelFEA:
         return [r for r in out if r is not None]
 
     def _prepare(
-        self, solid: BoolArray, stiffness: FloatArray | None, preconditioner: str | None
+        self,
+        solid: BoolArray,
+        stiffness: FloatArray | None,
+        preconditioner: str | None,
+        wanted: Callable[[BoolArray], bool],
     ) -> _Ready:
         """What every load case's solve of ``solid`` shares: the material that's kept, its
-        elements and unknowns, the operator, Jacobi, and the multigrid hierarchy."""
+        elements and unknowns, the operator, Jacobi, and the multigrid hierarchy. Built only
+        where ``wanted(kept)`` -- some load reaches a support -- and something is free to
+        move: otherwise ``free`` is None and nothing is built (an unsupported part costs no
+        set-up, as before solve_each)."""
         solid = np.asarray(solid, dtype=bool)
         method = self.preconditioner
         if preconditioner is not None:
@@ -551,6 +584,8 @@ class VoxelFEA:
         labels, _ = ndimage.label(solid)
         anchored = np.unique(labels[self._support_mask & solid])
         kept = np.isin(labels, anchored[anchored > 0])
+        if not wanted(kept):
+            return _Ready(kept, None, None, None, None, None, None, None, None, None)
         elements = np.flatnonzero(kept.ravel())
         edof = self._edof[elements]
         flat = edof.ravel()
@@ -620,7 +655,7 @@ class VoxelFEA:
                 return multigrid.pcg(matvec, cycle, b, rtol=rtol, maxiter=patience)
 
             loads = [force[free] for force in forces]
-            threads = min(len(loads), CASE_THREADS)
+            threads = min(len(loads), CASE_THREADS) if _blas_single() else 1
             if threads > 1:
                 with ThreadPoolExecutor(threads) as pool:
                     solved = list(pool.map(by_multigrid, loads))

@@ -332,3 +332,111 @@ def test_solve_still_judges_its_cases_together_from_the_same_solves() -> None:
     assert np.array_equal(together.displacement, each[0].displacement)
     assert together.case_compliance == tuple(r.compliance for r in each)
     assert together.max_displacement == max(r.max_displacement for r in each)
+
+
+# --- reviewer-2 at c76f258 ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("preconditioner", ["multigrid", "jacobi"])
+@pytest.mark.parametrize("what", ["empty", "held layer only"])
+def test_nothing_free_reads_unsupported_each_case_as_alone(preconditioner: str, what: str) -> None:
+    """No case live (an empty solid, or only the held layer: nothing free to move): each case
+    is its lone solve's unsupported result, never an error."""
+    shape, _, loads, support = _three()
+    solid = np.zeros(shape, dtype=bool)
+    if what == "held layer only":
+        solid[0] = True
+    kw = {"preconditioner": preconditioner}
+    each = VoxelFEA(shape, loads=loads, supports=[support], **kw).solve_each(solid)
+    assert [r.supported for r in each] == [False, False, False]
+    for load, mine in zip(loads, each, strict=True):
+        _same(mine, _alone(shape, load, support, **kw).solve(solid))
+    assert not VoxelFEA(shape, loads=loads, supports=[support], **kw).solve(solid).supported
+
+
+@pytest.mark.parametrize("threads", [1, 4])
+def test_a_case_that_falls_back_is_bit_for_bit_too(
+    monkeypatch: pytest.MonkeyPatch, threads: int
+) -> None:
+    """maxiter 3: multigrid gives up and Jacobi CG takes over; the fallback's fields are each
+    case's own."""
+    from whittle.physics import fea
+
+    monkeypatch.setattr(fea, "CASE_THREADS", threads)
+    shape, solid, loads, support = _three()
+    each = VoxelFEA(shape, loads=loads, supports=[support]).solve_each(solid, maxiter=3)
+    assert all(r.fell_back and r.fallback_iterations > 0 for r in each)
+    for load, mine in zip(loads, each, strict=True):
+        _same(mine, _alone(shape, load, support).solve(solid, maxiter=3))
+
+
+def test_an_unsupported_part_builds_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reach check comes before the operator and the hierarchy, as it did before solve_each:
+    a part with no path from its loads to a support costs no set-up."""
+    from whittle.physics import fea
+
+    def never(*a: object, **k: object) -> None:
+        raise AssertionError("built a hierarchy for an unsupported part")
+
+    monkeypatch.setattr(fea.multigrid, "Multigrid", never)
+    monkeypatch.setattr(fea, "LinearOperator", never)
+    shape, solid, loads, support = _three()
+    solid = solid.copy()
+    solid[5:7] = False                              # every load cut off from the clamp
+    solver = VoxelFEA(shape, loads=loads, supports=[support])
+    assert not solver.solve(solid).supported
+    assert [r.supported for r in solver.solve_each(solid)] == [False, False, False]
+
+
+def test_case_threads_run_only_where_blas_is_single_threaded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bit for bit holds with one BLAS thread, or one solve at a time: where BLAS is threaded,
+    the cases are solved one after another (reviewer-2: concurrent solves of a threaded
+    OpenMP OpenBLAS come back wrong while saying they converged)."""
+    from whittle.physics import fea
+
+    monkeypatch.setattr(fea, "CASE_THREADS", 4)
+    seen: list[int] = []
+    real = fea.ThreadPoolExecutor
+
+    def counted(threads: int) -> object:
+        seen.append(threads)
+        return real(threads)
+
+    monkeypatch.setattr(fea, "ThreadPoolExecutor", counted)
+    shape, solid, loads, support = _three()
+    solver = VoxelFEA(shape, loads=loads, supports=[support])
+    monkeypatch.setattr(fea, "_blas_single", lambda: False)
+    threaded = solver.solve_each(solid)
+    assert seen == []
+    monkeypatch.setattr(fea, "_blas_single", lambda: True)
+    single = solver.solve_each(solid)
+    assert seen == [3]
+    for a, b in zip(threaded, single, strict=True):
+        _same(a, b)
+
+
+def test_blas_reads_single_threaded_from_its_pools_or_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from whittle.physics import fea
+
+    threadpoolctl = pytest.importorskip("threadpoolctl")
+    with threadpoolctl.threadpool_limits(limits=1):
+        assert fea._blas_single()
+    with threadpoolctl.threadpool_limits(limits=2):
+        info = threadpoolctl.threadpool_info()
+        if any(i["num_threads"] > 1 for i in info):          # a BLAS that threads at all
+            assert not fea._blas_single()
+    monkeypatch.setattr(threadpoolctl, "threadpool_info",
+                        lambda: [{"internal_api": "openblas", "num_threads": 1},
+                                 {"internal_api": "openmp", "num_threads": 12}])
+    assert not fea._blas_single()                                # every pool, not any
+    # not installed: the environment says
+    monkeypatch.setitem(__import__("sys").modules, "threadpoolctl", None)
+    monkeypatch.setenv("OMP_NUM_THREADS", "1")
+    monkeypatch.setenv("OPENBLAS_NUM_THREADS", "1")
+    assert fea._blas_single()
+    monkeypatch.setenv("OPENBLAS_NUM_THREADS", "4")
+    assert not fea._blas_single()
