@@ -474,6 +474,8 @@ def test_cases_run_on_as_many_threads_as_allowed(
 
     monkeypatch.setattr(mg, "pcg", spy)
     monkeypatch.setattr("whittle.physics.fea.CASE_THREADS", setting)
+    # case threads run only on single-threaded BLAS (#9)
+    monkeypatch.setattr("whittle.physics.fea._blas_single", lambda: True)
     fea.solve(solid)
     assert len(seen) == cases
     workers = {t for t in seen if t is not threading.main_thread()}
